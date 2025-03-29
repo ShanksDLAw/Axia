@@ -130,41 +130,51 @@ class PortfolioOptimizer:
                 reg_cov_matrix = risk_models.sample_cov(self.price_data, frequency=252)
                 reg_cov_matrix += np.eye(reg_cov_matrix.shape[0]) * 1e-6
 
-            # Enhanced sector risk calculation with proper validation using filtered data
-            sector_counts = defaultdict(int)
-            sector_vols = defaultdict(float)
-            sector_returns = defaultdict(list)
+            # Enhanced sector risk calculation with batch processing and validation
+            sector_data = defaultdict(lambda: {'count': 0, 'vol_sum': 0.0, 'returns': []})
             
+            # Pre-calculate median values for fallbacks
+            median_cov = np.median(np.diag(reg_cov_matrix))
+            median_return = np.median(filtered_returns)
+            
+            # Process symbols in batches for better efficiency
             for symbol in valid_symbols:
                 sector = self.normalized_sectors.get(symbol)
-                if sector:
-                    try:
-                        idx = list(filtered_price_data.columns).index(symbol)
-                        if idx >= len(reg_cov_matrix):
-                            logging.warning(f"Index out of bounds for {symbol}, skipping")
-                            continue
-                            
-                        sector_counts[sector] += 1
-                        
-                        # Calculate volatility with enhanced validation
-                        cov_value = reg_cov_matrix[idx, idx]
-                        if not np.isfinite(cov_value) or cov_value < 0:
-                            logging.warning(f"Invalid covariance value for {symbol}, using fallback")
-                            cov_value = np.median(np.diag(reg_cov_matrix))
-                            
-                        symbol_vol = np.sqrt(max(1e-8, cov_value))
-                        sector_vols[sector] += symbol_vol
-                            
-                        # Track sector returns with validation
-                        return_value = filtered_returns[idx]
-                        if np.isfinite(return_value):
-                            sector_returns[sector].append(return_value)
-                        else:
-                            logging.warning(f"Invalid return value for {symbol}, using fallback")
-                            sector_returns[sector].append(np.median(filtered_returns))
-                    except Exception as e:
-                        logging.warning(f"Error processing sector metrics for {symbol}: {e}")
+                if not sector:
+                    continue
+                    
+                try:
+                    idx = list(filtered_price_data.columns).index(symbol)
+                    if idx >= len(reg_cov_matrix):
                         continue
+                    
+                    # Get and validate covariance value
+                    cov_value = reg_cov_matrix[idx, idx]
+                    if not np.isfinite(cov_value) or cov_value < 0:
+                        cov_value = median_cov
+                    
+                    # Calculate and add volatility
+                    symbol_vol = np.sqrt(max(1e-8, cov_value))
+                    
+                    # Get and validate return value
+                    return_value = filtered_returns[idx]
+                    if not np.isfinite(return_value):
+                        return_value = median_return
+                    
+                    # Update sector data
+                    sector_data[sector]['count'] += 1
+                    sector_data[sector]['vol_sum'] += symbol_vol
+                    sector_data[sector]['returns'].append(return_value)
+                    
+                except Exception:
+                    continue
+            
+            # Convert processed data to required format
+            sector_counts = {k: v['count'] for k, v in sector_data.items()}
+            sector_vols = {k: v['vol_sum'] / v['count'] if v['count'] > 0 else 0 
+                          for k, v in sector_data.items()}
+            sector_returns = {k: np.mean(v['returns']) if v['returns'] else 0 
+                             for k, v in sector_data.items()}
                         
             # Validate sector data
             if not sector_counts:
@@ -1095,41 +1105,51 @@ class PortfolioOptimizer:
                 reg_cov_matrix = risk_models.sample_cov(self.price_data, frequency=252)
                 reg_cov_matrix += np.eye(reg_cov_matrix.shape[0]) * 1e-6
 
-            # Enhanced sector risk calculation with proper validation using filtered data
-            sector_counts = defaultdict(int)
-            sector_vols = defaultdict(float)
-            sector_returns = defaultdict(list)
+            # Enhanced sector risk calculation with batch processing and validation
+            sector_data = defaultdict(lambda: {'count': 0, 'vol_sum': 0.0, 'returns': []})
             
+            # Pre-calculate median values for fallbacks
+            median_cov = np.median(np.diag(reg_cov_matrix))
+            median_return = np.median(filtered_returns)
+            
+            # Process symbols in batches for better efficiency
             for symbol in valid_symbols:
                 sector = self.normalized_sectors.get(symbol)
-                if sector:
-                    try:
-                        idx = list(filtered_price_data.columns).index(symbol)
-                        if idx >= len(reg_cov_matrix):
-                            logging.warning(f"Index out of bounds for {symbol}, skipping")
-                            continue
-                            
-                        sector_counts[sector] += 1
-                        
-                        # Calculate volatility with enhanced validation
-                        cov_value = reg_cov_matrix[idx, idx]
-                        if not np.isfinite(cov_value) or cov_value < 0:
-                            logging.warning(f"Invalid covariance value for {symbol}, using fallback")
-                            cov_value = np.median(np.diag(reg_cov_matrix))
-                            
-                        symbol_vol = np.sqrt(max(1e-8, cov_value))
-                        sector_vols[sector] += symbol_vol
-                            
-                        # Track sector returns with validation
-                        return_value = filtered_returns[idx]
-                        if np.isfinite(return_value):
-                            sector_returns[sector].append(return_value)
-                        else:
-                            logging.warning(f"Invalid return value for {symbol}, using fallback")
-                            sector_returns[sector].append(np.median(filtered_returns))
-                    except Exception as e:
-                        logging.warning(f"Error processing sector metrics for {symbol}: {e}")
+                if not sector:
+                    continue
+                    
+                try:
+                    idx = list(filtered_price_data.columns).index(symbol)
+                    if idx >= len(reg_cov_matrix):
                         continue
+                    
+                    # Get and validate covariance value
+                    cov_value = reg_cov_matrix[idx, idx]
+                    if not np.isfinite(cov_value) or cov_value < 0:
+                        cov_value = median_cov
+                    
+                    # Calculate and add volatility
+                    symbol_vol = np.sqrt(max(1e-8, cov_value))
+                    
+                    # Get and validate return value
+                    return_value = filtered_returns[idx]
+                    if not np.isfinite(return_value):
+                        return_value = median_return
+                    
+                    # Update sector data
+                    sector_data[sector]['count'] += 1
+                    sector_data[sector]['vol_sum'] += symbol_vol
+                    sector_data[sector]['returns'].append(return_value)
+                    
+                except Exception:
+                    continue
+            
+            # Convert processed data to required format
+            sector_counts = {k: v['count'] for k, v in sector_data.items()}
+            sector_vols = {k: v['vol_sum'] / v['count'] if v['count'] > 0 else 0 
+                          for k, v in sector_data.items()}
+            sector_returns = {k: np.mean(v['returns']) if v['returns'] else 0 
+                             for k, v in sector_data.items()}
                         
             # Validate sector data
             if not sector_counts:

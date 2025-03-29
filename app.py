@@ -163,6 +163,33 @@ if st.button("Run Analysis"):
             'preferred_features': [],
             'user_email': ''
         }
+    
+    # Function to save feedback
+    def save_feedback(feedback_data):
+        try:
+            import json
+            import os
+            from datetime import datetime
+            
+            # Create feedback directory if it doesn't exist
+            feedback_dir = os.path.join(os.path.dirname(__file__), 'feedback')
+            os.makedirs(feedback_dir, exist_ok=True)
+            
+            # Add timestamp to feedback data
+            feedback_data['timestamp'] = datetime.now().isoformat()
+            
+            # Generate unique filename
+            filename = f"feedback_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            filepath = os.path.join(feedback_dir, filename)
+            
+            # Save feedback to file
+            with open(filepath, 'w') as f:
+                json.dump(feedback_data, f, indent=4)
+                
+            return True
+        except Exception as e:
+            st.error(f"Error saving feedback: {str(e)}")
+            return False
 
     # Feedback Form with error handling
     try:
@@ -231,18 +258,24 @@ if st.button("Run Analysis"):
                     if not st.session_state.form_data['user_email'] or '@' not in st.session_state.form_data['user_email']:
                         st.error("Please provide a valid email address.")
                     else:
-                        # Here you would implement email sending logic
-                        st.session_state.feedback_submitted = True
-                        st.success("Thank you for your feedback! We'll keep you updated on our progress.")
+                        # Save feedback data
+                        feedback_saved = save_feedback(st.session_state.form_data)
                         
-                        # Clear form data after successful submission
-                        st.session_state.form_data = {
-                            'user_experience': 3,
-                            'feedback_text': '',
-                            'custom_model_preference': 'No, not interested',
-                            'preferred_features': [],
-                            'user_email': ''
-                        }
+                        if feedback_saved:
+                            st.session_state.feedback_submitted = True
+                            st.success("Thank you for your feedback! We'll keep you updated on our progress.")
+                            
+                            # Clear form data after successful submission
+                            st.session_state.form_data = {
+                                'user_experience': 3,
+                                'feedback_text': '',
+                                'custom_model_preference': 'No, not interested',
+                                'preferred_features': [],
+                                'user_email': ''
+                            }
+                        else:
+                            st.error("Failed to save feedback. Please try again.")
+                            st.session_state.feedback_submitted = False
                 except Exception as e:
                     st.error(f"An error occurred while submitting feedback. Please try again.")
                     logging.error(f"Feedback submission error: {str(e)}")
