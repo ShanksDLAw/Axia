@@ -76,7 +76,7 @@ class Backtester:
             # Calculate portfolio returns with validated data
             portfolio_returns = pd.Series(index=aligned_returns.index, dtype=float)
             
-            # Enhanced transaction cost handling
+            # Enhanced transaction cost handling with proper weight drift
             initial_turnover = aligned_weights.abs().sum()
             portfolio_returns.iloc[0] = aligned_returns.iloc[0].dot(aligned_weights) - transaction_cost * initial_turnover
             
@@ -92,16 +92,17 @@ class Backtester:
                         returns_vector = returns_vector.fillna(0)
                         logging.warning(f"NaN returns at index {i-1}. Filled with 0.")
                     
+                    # Calculate drifted weights based on previous day's returns
                     drifted_weights = portfolio_weights * (1 + returns_vector)
                     drifted_sum = drifted_weights.sum()
                     
-                    if drifted_sum <= 0:
-                        logging.warning(f"Invalid drifted weights sum at index {i}. Using previous weights.")
-                        drifted_weights = portfolio_weights
+                    if drifted_sum <= 0 or np.isnan(drifted_sum):
+                        logging.warning(f"Invalid drifted weights sum at index {i}. Using target weights.")
+                        drifted_weights = aligned_weights.copy()
                     else:
                         drifted_weights = drifted_weights / drifted_sum
                     
-                    # Calculate and apply transaction costs
+                    # Calculate turnover based on difference from target weights
                     turnover = (aligned_weights - drifted_weights).abs().sum()
                     cumulative_turnover += turnover
                     
@@ -109,12 +110,12 @@ class Backtester:
                     daily_return = aligned_returns.iloc[i].dot(aligned_weights) - transaction_cost * turnover
                     portfolio_returns.iloc[i] = daily_return
                     
-                    # Update for next iteration
+                    # Update weights for next iteration
                     portfolio_weights = aligned_weights.copy()
                     
                 except Exception as inner_e:
                     logging.error(f"Error at iteration {i}: {str(inner_e)}")
-                    portfolio_returns.iloc[i] = 0
+                    portfolio_returns.iloc[i] = portfolio_returns.iloc[i-1] if i > 0 else 0
             
             # Calculate comprehensive metrics
             metrics = self._calculate_metrics(portfolio_returns, risk_free_rate)
