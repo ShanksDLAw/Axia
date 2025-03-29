@@ -141,3 +141,54 @@ if st.button("Run Analysis"):
         
     except Exception as e:
         st.error(f"Error displaying portfolio analysis: {str(e)}")
+    
+    # Step 6: Feedback Collection
+    st.markdown("---")
+    st.subheader("🔬 Proof of Concept & Feedback")
+    
+    # POC Disclaimer
+    st.info("""
+    👋 Thank you for trying out Axia! This is currently a Proof of Concept (POC) version, and we're actively working on improvements. 
+    While you might encounter some bugs, your feedback is invaluable in helping us create a better product.
+    """)
+    
+    # Feedback Form
+    st.subheader("📝 Share Your Thoughts")
+    user_experience = st.slider("How would you rate your experience?", 1, 5, 3)
+    feedback_text = st.text_area("What could we improve?", height=100)
+    
+    # Feature Survey
+    st.subheader("🚀 Future Features")
+    st.write("We're considering adding the ability to create custom models and algorithms. How would you like to use this feature?")
+    
+    custom_model_preference = st.radio(
+        "Would you be interested in creating custom investment models?",
+        ['Yes, from scratch', 'Yes, using templates', 'No, not interested'],
+        key='custom_model'
+    )
+    
+    if custom_model_preference.startswith('Yes'):
+        preferred_features = st.multiselect(
+            "Which features would you find most useful?",
+            [
+                "Custom risk models",
+                "Alternative data integration",
+                "Machine learning templates",
+                "Backtesting framework",
+                "API integration",
+                "Community model sharing"
+            ]
+        )
+    
+    # Contact Information
+    st.subheader("📫 Stay Updated")
+    st.write("Leave your email to receive updates about new features and improvements!")
+    user_email = st.text_input("Email address")
+    
+    # Submit Button
+    if st.button("Submit Feedback"):
+        if user_email:
+            # Here you would typically implement email sending logic
+            st.success("Thank you for your feedback! We'll keep you updated on our progress.")
+        else:
+            st.warning("Please provide an email address to submit your feedback.")
