@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-import cp
+import cvxpy as cp
 from scipy.cluster.hierarchy import linkage, fcluster
 from sklearn.linear_model import objective_functions
 from sklearn.covariance import risk_models
