@@ -23,6 +23,8 @@ class PortfolioOptimizer:
         self.expected_returns = self.returns_df.mean()
         # Initialize sectors attribute
         self.sectors = sectors
+        # Normalize sectors for consistent access
+        self.normalized_sectors = {k: v for k, v in sectors.items()} if sectors else {}
 
     def optimize(self, regime: str, risk_appetite: str) -> tuple[dict[str, float], dict]:
         """Optimize portfolio based on investment regime and risk appetite.

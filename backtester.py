@@ -55,10 +55,20 @@ class Backtester:
             portfolio_returns.iloc[0] -= transaction_cost * turnover
             
             # Ongoing turnover calculation with proper weight alignment
+            # Initialize portfolio weights that will be updated over time
+            portfolio_weights = aligned_weights.copy()
+            
             for i in range(1, len(portfolio_returns)):
-                # Calculate turnover based on aligned weights
-                turnover = (aligned_weights - aligned_weights * (1 + aligned_returns.iloc[i-1])).abs().sum()
+                # Calculate how weights drift due to returns
+                drifted_weights = portfolio_weights * (1 + aligned_returns.iloc[i-1])
+                drifted_weights = drifted_weights / drifted_weights.sum()  # Normalize to ensure sum = 1
+                
+                # Calculate turnover as the absolute difference between target weights and drifted weights
+                turnover = (aligned_weights - drifted_weights).abs().sum()
                 portfolio_returns.iloc[i] -= transaction_cost * turnover
+                
+                # Update portfolio weights for next iteration
+                portfolio_weights = aligned_weights.copy()
             
             # Calculate comprehensive metrics
             metrics = self._calculate_metrics(portfolio_returns, risk_free_rate)
