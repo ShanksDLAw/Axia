@@ -259,7 +259,7 @@ class PortfolioOptimizer:
 
             if not success:
                 # Enhanced multi-stage fallback system with hierarchical optimization approaches
-                logging.info("Initiating enhanced fallback optimization strategy"))
+                logging.info("Initiating enhanced fallback optimization strategy")
                 
                 # Stage 1: Advanced Risk Parity with correlation adjustment
                 try:
@@ -1212,7 +1212,7 @@ class PortfolioOptimizer:
 
             if not success:
                 # Enhanced multi-stage fallback system with hierarchical optimization approaches
-                logging.info("Initiating enhanced fallback optimization strategy"))
+                logging.info("Initiating enhanced fallback optimization strategy")
                 
                 # Stage 1: Advanced Risk Parity with correlation adjustment
                 try:
