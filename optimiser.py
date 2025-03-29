@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import cvxpy as cp
+import warnings
 from scipy.cluster.hierarchy import linkage, fcluster
 from pypfopt import objective_functions
 from pypfopt import risk_models
@@ -8,6 +9,9 @@ from pypfopt.hierarchical_portfolio import HRPOpt
 from pypfopt.efficient_frontier import EfficientFrontier
 from collections import defaultdict
 import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
 
 class PortfolioOptimizer:
@@ -136,18 +140,30 @@ class PortfolioOptimizer:
                 if sector:
                     try:
                         idx = list(filtered_price_data.columns).index(symbol)
+                        if idx >= len(reg_cov_matrix):
+                            logging.warning(f"Index out of bounds for {symbol}, skipping")
+                            continue
+                            
                         sector_counts[sector] += 1
                         
-                        # Calculate volatility with validation
-                        symbol_vol = np.sqrt(max(0, reg_cov_matrix[idx, idx]))
-                        if not np.isnan(symbol_vol) and not np.isinf(symbol_vol):
-                            sector_vols[sector] += symbol_vol
+                        # Calculate volatility with enhanced validation
+                        cov_value = reg_cov_matrix[idx, idx]
+                        if not np.isfinite(cov_value) or cov_value < 0:
+                            logging.warning(f"Invalid covariance value for {symbol}, using fallback")
+                            cov_value = np.median(np.diag(reg_cov_matrix))
                             
-                        # Track sector returns for risk-adjusted allocation
-                        if not np.isnan(filtered_returns[idx]):
-                            sector_returns[sector].append(filtered_returns[idx])
+                        symbol_vol = np.sqrt(max(1e-8, cov_value))
+                        sector_vols[sector] += symbol_vol
+                            
+                        # Track sector returns with validation
+                        return_value = filtered_returns[idx]
+                        if np.isfinite(return_value):
+                            sector_returns[sector].append(return_value)
+                        else:
+                            logging.warning(f"Invalid return value for {symbol}, using fallback")
+                            sector_returns[sector].append(np.median(filtered_returns))
                     except Exception as e:
-                        logging.warning(f"Error processing sector metrics for {symbol}: {str(e)}")
+                        logging.warning(f"Error processing sector metrics for {symbol}: {e}")
                         continue
                         
             # Validate sector data
@@ -1089,18 +1105,30 @@ class PortfolioOptimizer:
                 if sector:
                     try:
                         idx = list(filtered_price_data.columns).index(symbol)
+                        if idx >= len(reg_cov_matrix):
+                            logging.warning(f"Index out of bounds for {symbol}, skipping")
+                            continue
+                            
                         sector_counts[sector] += 1
                         
-                        # Calculate volatility with validation
-                        symbol_vol = np.sqrt(max(0, reg_cov_matrix[idx, idx]))
-                        if not np.isnan(symbol_vol) and not np.isinf(symbol_vol):
-                            sector_vols[sector] += symbol_vol
+                        # Calculate volatility with enhanced validation
+                        cov_value = reg_cov_matrix[idx, idx]
+                        if not np.isfinite(cov_value) or cov_value < 0:
+                            logging.warning(f"Invalid covariance value for {symbol}, using fallback")
+                            cov_value = np.median(np.diag(reg_cov_matrix))
                             
-                        # Track sector returns for risk-adjusted allocation
-                        if not np.isnan(filtered_returns[idx]):
-                            sector_returns[sector].append(filtered_returns[idx])
+                        symbol_vol = np.sqrt(max(1e-8, cov_value))
+                        sector_vols[sector] += symbol_vol
+                            
+                        # Track sector returns with validation
+                        return_value = filtered_returns[idx]
+                        if np.isfinite(return_value):
+                            sector_returns[sector].append(return_value)
+                        else:
+                            logging.warning(f"Invalid return value for {symbol}, using fallback")
+                            sector_returns[sector].append(np.median(filtered_returns))
                     except Exception as e:
-                        logging.warning(f"Error processing sector metrics for {symbol}: {str(e)}")
+                        logging.warning(f"Error processing sector metrics for {symbol}: {e}")
                         continue
                         
             # Validate sector data

@@ -151,44 +151,102 @@ if st.button("Run Analysis"):
     👋 Thank you for trying out Axia! This is currently a Proof of Concept (POC) version, and we're actively working on improvements. 
     While you might encounter some bugs, your feedback is invaluable in helping us create a better product.
     """)
-    
-    # Feedback Form
-    st.subheader("📝 Share Your Thoughts")
-    user_experience = st.slider("How would you rate your experience?", 1, 5, 3)
-    feedback_text = st.text_area("What could we improve?", height=100)
-    
-    # Feature Survey
-    st.subheader("🚀 Future Features")
-    st.write("We're considering adding the ability to create custom models and algorithms. How would you like to use this feature?")
-    
-    custom_model_preference = st.radio(
-        "Would you be interested in creating custom investment models?",
-        ['Yes, from scratch', 'Yes, using templates', 'No, not interested'],
-        key='custom_model'
-    )
-    
-    if custom_model_preference.startswith('Yes'):
-        preferred_features = st.multiselect(
-            "Which features would you find most useful?",
-            [
-                "Custom risk models",
-                "Alternative data integration",
-                "Machine learning templates",
-                "Backtesting framework",
-                "API integration",
-                "Community model sharing"
-            ]
-        )
-    
-    # Contact Information
-    st.subheader("📫 Stay Updated")
-    st.write("Leave your email to receive updates about new features and improvements!")
-    user_email = st.text_input("Email address")
-    
-    # Submit Button
-    if st.button("Submit Feedback"):
-        if user_email:
-            # Here you would typically implement email sending logic
-            st.success("Thank you for your feedback! We'll keep you updated on our progress.")
-        else:
-            st.warning("Please provide an email address to submit your feedback.")
+     
+    # Initialize session state for form data persistence
+    if 'feedback_submitted' not in st.session_state:
+        st.session_state.feedback_submitted = False
+    if 'form_data' not in st.session_state:
+        st.session_state.form_data = {
+            'user_experience': 3,
+            'feedback_text': '',
+            'custom_model_preference': 'No, not interested',
+            'preferred_features': [],
+            'user_email': ''
+        }
+
+    # Feedback Form with error handling
+    try:
+        with st.form(key='feedback_form'):
+            st.subheader("📝 Share Your Thoughts")
+            
+            # User Experience Rating
+            st.session_state.form_data['user_experience'] = st.slider(
+                "How would you rate your experience?",
+                min_value=1,
+                max_value=5,
+                value=st.session_state.form_data['user_experience'],
+                help="Slide to rate your experience from 1 to 5"
+            )
+            
+            # Feedback Text
+            st.session_state.form_data['feedback_text'] = st.text_area(
+                "What could we improve?",
+                value=st.session_state.form_data['feedback_text'],
+                height=100,
+                help="Share your thoughts on how we can improve"
+            )
+            
+            # Feature Survey
+            st.subheader("🚀 Future Features")
+            st.write("We're considering adding the ability to create custom models and algorithms. How would you like to use this feature?")
+            
+            st.session_state.form_data['custom_model_preference'] = st.radio(
+                "Would you be interested in creating custom investment models?",
+                ['Yes, from scratch', 'Yes, using templates', 'No, not interested'],
+                index=['Yes, from scratch', 'Yes, using templates', 'No, not interested'].index(
+                    st.session_state.form_data['custom_model_preference']
+                )
+            )
+            
+            # Show feature selection only if interested
+            if st.session_state.form_data['custom_model_preference'].startswith('Yes'):
+                st.session_state.form_data['preferred_features'] = st.multiselect(
+                    "Which features would you find most useful?",
+                    [
+                        "Custom risk models",
+                        "Alternative data integration",
+                        "Machine learning templates",
+                        "Backtesting framework",
+                        "API integration",
+                        "Community model sharing"
+                    ],
+                    default=st.session_state.form_data['preferred_features']
+                )
+            
+            # Contact Information
+            st.subheader("📫 Stay Updated")
+            st.write("Leave your email to receive updates about new features and improvements!")
+            st.session_state.form_data['user_email'] = st.text_input(
+                "Email address",
+                value=st.session_state.form_data['user_email'],
+                help="Enter your email to receive updates"
+            )
+            
+            # Submit Button
+            submit_button = st.form_submit_button("Submit Feedback")
+            
+            if submit_button:
+                try:
+                    # Validate email format
+                    if not st.session_state.form_data['user_email'] or '@' not in st.session_state.form_data['user_email']:
+                        st.error("Please provide a valid email address.")
+                    else:
+                        # Here you would implement email sending logic
+                        st.session_state.feedback_submitted = True
+                        st.success("Thank you for your feedback! We'll keep you updated on our progress.")
+                        
+                        # Clear form data after successful submission
+                        st.session_state.form_data = {
+                            'user_experience': 3,
+                            'feedback_text': '',
+                            'custom_model_preference': 'No, not interested',
+                            'preferred_features': [],
+                            'user_email': ''
+                        }
+                except Exception as e:
+                    st.error(f"An error occurred while submitting feedback. Please try again.")
+                    logging.error(f"Feedback submission error: {str(e)}")
+                    
+    except Exception as e:
+        st.error("An error occurred while rendering the feedback form. Please refresh the page.")
+        logging.error(f"Feedback form error: {str(e)}")
