@@ -126,17 +126,23 @@ class PortfolioOptimizer:
     def _aggressive_strategy(self, constraints: dict, momentum_score: pd.Series) -> tuple[dict[str, float], dict]:
         """Aggressive portfolio optimization with momentum-based asset selection and enhanced risk management."""
         try:
-            # Calculate expected returns with momentum
-            expected_returns = self._calculate_expected_returns(momentum_score)
+            # Ensure alignment between price data and momentum score
+            common_assets = self.price_data.columns.intersection(momentum_score.index)
+            if len(common_assets) == 0:
+                raise ValueError("No common assets between price data and momentum score")
+            
+            # Calculate expected returns with momentum for common assets
+            expected_returns = self._calculate_expected_returns(momentum_score[common_assets])
             
             # Enhanced momentum filtering for aggressive strategy
-            top_momentum_threshold = np.percentile(momentum_score, 85)  # More selective asset filtering
-            high_momentum_assets = momentum_score[momentum_score >= top_momentum_threshold].index
+            valid_momentum = momentum_score[common_assets]
+            top_momentum_threshold = np.percentile(valid_momentum, 85)  # More selective asset filtering
+            high_momentum_assets = valid_momentum[valid_momentum >= top_momentum_threshold].index
             
             # Ensure minimum number of assets for diversification
             if len(high_momentum_assets) < 10:
-                top_momentum_threshold = np.percentile(momentum_score, 70)
-                high_momentum_assets = momentum_score[momentum_score >= top_momentum_threshold].index
+                top_momentum_threshold = np.percentile(valid_momentum, 70)
+                high_momentum_assets = valid_momentum[valid_momentum >= top_momentum_threshold].index
             
             # Prepare optimization universe with enhanced return expectations
             optimization_universe = list(high_momentum_assets)
@@ -183,11 +189,20 @@ class PortfolioOptimizer:
     def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series) -> tuple[dict[str, float], dict]:
         """Balanced portfolio optimization with risk-adjusted momentum approach."""
         try:
+            # Ensure alignment between price data and momentum score
+            common_assets = self.price_data.columns.intersection(momentum_score.index)
+            if len(common_assets) == 0:
+                raise ValueError("No common assets between price data and momentum score")
+            
             # Calculate expected returns with balanced momentum influence
-            expected_returns = self._calculate_expected_returns(momentum_score * 0.7)  # Reduced momentum influence
+            valid_momentum = momentum_score[common_assets]
+            expected_returns = self._calculate_expected_returns(valid_momentum * 0.7)  # Reduced momentum influence
             
             # Filter assets with positive momentum
-            valid_assets = momentum_score[momentum_score > 0].index
+            valid_assets = valid_momentum[valid_momentum > 0].index
+            if len(valid_assets) < 5:
+                # If too few positive momentum assets, include top neutral momentum assets
+                valid_assets = valid_momentum.nlargest(max(10, len(common_assets) // 4)).index
             filtered_returns = expected_returns[valid_assets]
             
             # Calculate risk model with balanced lookback
@@ -229,24 +244,31 @@ class PortfolioOptimizer:
     def _defensive_strategy(self, constraints: dict) -> tuple[dict[str, float], dict[str, float]]:
         """Defensive portfolio optimization with enhanced constraint handling and risk management"""
         try:
-            # Ensure normalized sectors are available
-            if not hasattr(self, 'normalized_sectors'):
-                # Map sectors to ensure consistency with asset_loader.py
-                sector_mapping = {
-                    'Consumer Cyclical': 'Consumer Discretionary',
-                    'Consumer Defensive': 'Consumer Staples',
-                    'Financial': 'Financial Services',
-                    'Technology': 'Information Technology',
-                    'Basic Materials': 'Materials'
-                }
+            # Ensure we have valid price data
+            if self.price_data.empty:
+                raise ValueError("Empty price data")
                 
-                # Create a normalized sectors dictionary for optimization
-                normalized_sectors = {}
-                for symbol, sector in self.sectors.items():
-                    normalized_sectors[symbol] = sector_mapping.get(sector, sector)
+            # Get valid assets that exist in price data
+            valid_assets = self.price_data.columns
+            if len(valid_assets) == 0:
+                raise ValueError("No valid assets found in price data")
                 
-                # Use normalized sectors for optimization
-                self.normalized_sectors = normalized_sectors
+            # Calculate risk metrics for asset filtering
+            volatility = self.returns_df[valid_assets].std() * np.sqrt(252)
+            drawdown = (self.price_data[valid_assets] / self.price_data[valid_assets].expanding().max() - 1).min()
+            
+            # Filter for low volatility assets
+            low_vol_threshold = np.percentile(volatility, 30)  # Focus on bottom 30% by volatility
+            low_vol_assets = volatility[volatility <= low_vol_threshold].index
+            
+            # Further filter by drawdown
+            max_acceptable_drawdown = -0.15  # -15% maximum drawdown threshold
+            defensive_assets = [asset for asset in low_vol_assets if drawdown[asset] >= max_acceptable_drawdown]
+            
+            if len(defensive_assets) < 5:
+                # If too few assets meet criteria, include more based on combined risk score
+                risk_score = volatility * abs(drawdown)
+                defensive_assets = risk_score.nsmallest(max(10, len(valid_assets) // 4)).index
                 
             # Filter data to use only valid symbols with both price data and sector information
             sector_symbols = set(self.normalized_sectors.keys())
