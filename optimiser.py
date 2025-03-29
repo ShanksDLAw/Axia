@@ -2,9 +2,12 @@ import numpy as np
 import pandas as pd
 import cvxpy as cp
 from scipy.cluster.hierarchy import linkage, fcluster
-from sklearn.linear_model import objective_functions
-from sklearn.covariance import risk_models
-from sklearn.linear_model import HRPOpt
+from pypfopt import objective_functions
+from pypfopt import risk_models
+from pypfopt.hierarchical_portfolio import HRPOpt
+from pypfopt.efficient_frontier import EfficientFrontier
+from collections import defaultdict
+import logging
 
 
 class PortfolioOptimizer:
