@@ -84,19 +84,44 @@ class PortfolioOptimizer:
         weight_array = np.array([weights.get(asset, 0) for asset in self.price_data.columns])
         return weight_array.T @ risk_models.sample_cov(self.price_data) @ weight_array
 
-    def _calculate_expected_returns(self, momentum_score=None):
-        """Calculate expected returns using multiple factors."""
-        # Historical returns (exponentially weighted)
-        hist_returns = self.returns_df.ewm(halflife=126).mean().iloc[-1]
+    def _calculate_expected_returns(self, momentum_score=None, regime='Neutral', risk_appetite='Moderate'):
+        """Calculate expected returns using multiple factors with enhanced risk-return adjustments."""
+        # Dynamic lookback period based on regime and risk appetite
+        lookback = 42 if regime == 'Bullish' and risk_appetite == 'Aggressive' else \
+                  (63 if regime == 'Bullish' else (252 if regime == 'Bearish' else 126))
         
-        # Momentum component
+        # Calculate historical returns with exponential weighting
+        hist_returns = self.returns_df.ewm(halflife=lookback, min_periods=21).mean().iloc[-1]
+        
+        # Enhanced momentum component with dynamic scaling
         if momentum_score is not None:
-            momentum_factor = 0.5
-            expected_returns = hist_returns * (1 - momentum_factor) + momentum_score * momentum_factor
+            # Stronger momentum influence for aggressive profiles in bullish markets
+            momentum_factor = 0.8 if regime == 'Bullish' and risk_appetite == 'Aggressive' else \
+                             (0.7 if regime == 'Bullish' else (0.3 if regime == 'Bearish' else 0.5))
+            
+            # Normalize momentum scores
+            momentum_returns = momentum_score * momentum_factor
+            
+            # Progressive risk scaling based on appetite and regime
+            base_scale = {'Conservative': 0.8, 'Moderate': 1.0, 'Aggressive': 1.4}[risk_appetite]
+            regime_scale = 1.2 if regime == 'Bullish' else (0.8 if regime == 'Bearish' else 1.0)
+            risk_scale = base_scale * regime_scale
+            
+            # Combine returns with enhanced weighting
+            expected_returns = (hist_returns * (1 - momentum_factor) + momentum_returns) * risk_scale
         else:
             expected_returns = hist_returns
         
-        return expected_returns
+        # Smart volatility adjustment
+        recent_vol = self.returns_df.rolling(window=21).std().iloc[-1]  # 1 month volatility
+        vol_adj = recent_vol * (0.8 if risk_appetite == 'Aggressive' else 1.0)  # Lower penalty for aggressive
+        vol_scale = 1.0 / (1 + vol_adj)
+        
+        # Apply volatility scaling with risk appetite consideration
+        if risk_appetite == 'Aggressive':
+            vol_scale = np.maximum(vol_scale, 0.8)  # Limit downside scaling for aggressive
+        
+        return expected_returns * vol_scale
 
     def _aggressive_strategy(self, constraints: dict, momentum_score: pd.Series) -> tuple[dict[str, float], dict]:
         """Aggressive portfolio optimization with momentum-based asset selection and enhanced risk management."""
@@ -104,31 +129,37 @@ class PortfolioOptimizer:
             # Calculate expected returns with momentum
             expected_returns = self._calculate_expected_returns(momentum_score)
             
-            # Filter top momentum assets
-            top_momentum_threshold = np.percentile(momentum_score, 70)
+            # Enhanced momentum filtering for aggressive strategy
+            top_momentum_threshold = np.percentile(momentum_score, 85)  # More selective asset filtering
             high_momentum_assets = momentum_score[momentum_score >= top_momentum_threshold].index
             
-            # Prepare optimization universe
-            optimization_universe = list(high_momentum_assets)
-            filtered_returns = expected_returns[optimization_universe]
+            # Ensure minimum number of assets for diversification
+            if len(high_momentum_assets) < 10:
+                top_momentum_threshold = np.percentile(momentum_score, 70)
+                high_momentum_assets = momentum_score[momentum_score >= top_momentum_threshold].index
             
-            # Calculate risk model with higher emphasis on recent data
-            price_data_recent = self.price_data[optimization_universe].tail(126)  # Last 6 months
+            # Prepare optimization universe with enhanced return expectations
+            optimization_universe = list(high_momentum_assets)
+            filtered_returns = expected_returns[optimization_universe] * 1.2  # Amplify return expectations
+            
+            # Calculate risk model with stronger emphasis on recent market behavior
+            price_data_recent = self.price_data[optimization_universe].tail(63)  # Last 3 months for higher responsiveness
             risk_model = risk_models.CovarianceShrinkage(
                 price_data_recent,
                 frequency=252
             ).ledoit_wolf()
             
-            # Set up efficient frontier with aggressive parameters
+            # Set up efficient frontier with more aggressive parameters
+            max_position = min(0.25, constraints['max_position'] * 1.5)  # Allow higher position limits
             ef = EfficientFrontier(
                 filtered_returns,
                 risk_model,
-                weight_bounds=(0, constraints['max_position'])
+                weight_bounds=(0, max_position)
             )
             
-            # Add objective functions with aggressive weights
-            ef.add_objective(objective_functions.L2_reg, gamma=0.1)  # Light regularization
-            ef.add_objective(objective_functions.MaxSharpe(risk_free_rate=0.02))  # Higher risk-free rate
+            # Add objective functions with more aggressive weights
+            ef.add_objective(objective_functions.L2_reg, gamma=0.05)  # Minimal regularization
+            ef.add_objective(objective_functions.MaxSharpe(risk_free_rate=0.01))  # Lower risk-free rate for higher allocation to risky assets
             
             # Optimize and clean weights
             weights = ef.optimize()
