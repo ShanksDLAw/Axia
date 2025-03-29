@@ -30,15 +30,35 @@ class PortfolioOptimizer:
             raise ValueError("Cannot initialize optimizer with empty price data")
         self.price_data = price_data
         self.sectors = sectors
-        # Enhanced returns estimation with exponential weighting
+        # Enhanced returns estimation with robust outlier handling
         self.returns_df = expected_returns.returns_from_prices(price_data)
-        self.expected_returns = expected_returns.ema_historical_return(price_data, span=252)
+        # Handle outliers in returns
+        self.returns_df = self.returns_df.clip(
+            lower=self.returns_df.quantile(0.01),
+            upper=self.returns_df.quantile(0.99),
+            axis=0
+        )
         
-        # Robust covariance estimation with additional shrinkage
-        self.cov_matrix = risk_models.CovarianceShrinkage(
-            price_data,
-            frequency=252
-        ).ledoit_wolf()
+        # Calculate expected returns using multiple methods for robustness
+        ema_returns = expected_returns.ema_historical_return(price_data, span=252)
+        capm_returns = expected_returns.capm_return(price_data)
+        mean_returns = expected_returns.mean_historical_return(price_data)
+        
+        # Combine return estimates with equal weighting
+        self.expected_returns = (ema_returns + capm_returns + mean_returns) / 3
+        
+        # Enhanced covariance estimation with robust shrinkage and conditioning
+        basic_cov = risk_models.sample_cov(price_data)
+        shrunk_cov = risk_models.CovarianceShrinkage(price_data).ledoit_wolf()
+        exp_cov = risk_models.exp_cov(price_data)
+        
+        # Combine covariance estimates with optimal weights
+        self.cov_matrix = 0.4 * shrunk_cov + 0.3 * basic_cov + 0.3 * exp_cov
+        
+        # Ensure positive definiteness
+        eigenvals = np.linalg.eigvals(self.cov_matrix)
+        if min(eigenvals) < 1e-8:
+            self.cov_matrix += np.eye(len(self.cov_matrix)) * 1e-8
         # Calculate sector allocations
         self.sector_weights = self._calculate_sector_weights()
     
@@ -49,6 +69,7 @@ class PortfolioOptimizer:
         
         # Normalize and validate sectors first
         sector_mapping = {
+            # Standard sector mappings
             'Consumer Cyclical': 'Consumer Discretionary',
             'Consumer Defensive': 'Consumer Staples',
             'Financial': 'Financial Services',
@@ -59,7 +80,18 @@ class PortfolioOptimizer:
             'Utilities': 'Utilities',
             'Real Estate': 'Real Estate',
             'Energy': 'Energy',
-            'Industrials': 'Industrials'
+            'Industrials': 'Industrials',
+            # ETF sector mappings
+            'BND': 'Fixed Income',
+            'LQD': 'Fixed Income',
+            'TLT': 'Fixed Income',
+            'AGG': 'Fixed Income',
+            'HYG': 'Fixed Income',
+            'IEF': 'Fixed Income',
+            'GLD': 'Commodities',
+            'SLV': 'Commodities',
+            'USO': 'Commodities',
+            'UNG': 'Commodities'
         }
         
         # Normalize sectors with validation
@@ -121,26 +153,48 @@ class PortfolioOptimizer:
     def optimize(self, regime: str, risk_appetite: str = 'Moderate') -> tuple[dict[str, float], dict]:
         """Optimize portfolio based on market regime and risk appetite"""
         try:
-            # Define risk-based constraints
-            risk_constraints = {
+            # Enhanced risk-based constraints with dynamic adjustments
+            base_risk_constraints = {
                 'Conservative': {
                     'min_bonds': 0.4,
                     'max_equity': 0.5,
                     'max_sector': 0.25,
-                    'target_vol': 0.12
+                    'target_vol': 0.12,
+                    'min_cash': 0.05,
+                    'max_single_asset': 0.15
                 },
                 'Moderate': {
                     'min_bonds': 0.25,
                     'max_equity': 0.7,
                     'max_sector': 0.3,
-                    'target_vol': 0.18
+                    'target_vol': 0.18,
+                    'min_cash': 0.03,
+                    'max_single_asset': 0.20
                 },
                 'Aggressive': {
                     'min_bonds': 0.1,
                     'max_equity': 0.9,
                     'max_sector': 0.35,
-                    'target_vol': 0.25
+                    'target_vol': 0.25,
+                    'min_cash': 0.02,
+                    'max_single_asset': 0.25
                 }
+            }
+            
+            # Adjust constraints based on market regime
+            regime_adjustments = {
+                'Bullish': {'target_vol': 1.2, 'max_equity': 1.1, 'min_bonds': 0.8},
+                'Bearish': {'target_vol': 0.8, 'max_equity': 0.9, 'min_bonds': 1.2},
+                'Neutral': {'target_vol': 1.0, 'max_equity': 1.0, 'min_bonds': 1.0}
+            }
+            
+            # Apply regime adjustments to base constraints
+            base_constraints = base_risk_constraints.get(risk_appetite, base_risk_constraints['Moderate'])
+            regime_adj = regime_adjustments.get(regime, regime_adjustments['Neutral'])
+            
+            risk_constraints = {
+                k: v * regime_adj.get(k, 1.0) if isinstance(v, (int, float)) else v
+                for k, v in base_constraints.items()
             }
             
             constraints = risk_constraints.get(risk_appetite, risk_constraints['Moderate'])
@@ -159,12 +213,35 @@ class PortfolioOptimizer:
                     relaxed_constraints['target_vol'] = constraints['target_vol'] * factor
                     
                     try:
+                        # Initialize EfficientFrontier with proper constraints
+                        ef = EfficientFrontier(self.expected_returns, self.cov_matrix)
+                        
+                        # Enhanced optimization with dynamic risk adjustment
+                        ef.add_constraint(lambda w: w >= 0.01)  # Minimum position size
+                        ef.add_constraint(lambda w: w <= relaxed_constraints['max_single_asset'])  # Maximum position size
+                        
+                        # Add sector constraints
+                        for sector, weight in self.sector_weights.items():
+                            assets_in_sector = [a for a, s in valid_sectors.items() if s == sector]
+                            if assets_in_sector:
+                                ef.add_sector_constraint(assets_in_sector, max_weight=relaxed_constraints['max_sector'])
+                        
+                        # Regime-specific optimization
                         if regime == 'Bullish':
-                            result = self._growth_strategy(relaxed_constraints)
+                            ef.add_objective(objective_functions.L2_reg, gamma=0.1)
+                            ef.add_objective(objective_functions.transaction_cost, w_prev=None, k=0.001)
+                            weights = ef.maximum_sharpe()
+                            result = (weights, ef.portfolio_performance(risk_free_rate=0.02))
                         elif regime == 'Bearish':
-                            result = self._defensive_strategy(relaxed_constraints)
-                        else:
-                            result = self._balanced_strategy(relaxed_constraints)
+                            ef.add_objective(objective_functions.L2_reg, gamma=0.5)
+                            ef.add_objective(objective_functions.transaction_cost, w_prev=None, k=0.002)
+                            weights = ef.minimum_volatility()
+                            result = (weights, ef.portfolio_performance(risk_free_rate=0.02))
+                        else:  # Balanced/Neutral
+                            ef.add_objective(objective_functions.L2_reg, gamma=0.25)
+                            ef.add_objective(objective_functions.transaction_cost, w_prev=None, k=0.0015)
+                            weights = ef.efficient_risk(relaxed_constraints['target_vol'])
+                            result = (weights, ef.portfolio_performance(risk_free_rate=0.02))
                             
                         if result is not None and isinstance(result, tuple) and len(result) == 2:
                             logging.info(f"Optimization succeeded with relaxation factor {factor}")
