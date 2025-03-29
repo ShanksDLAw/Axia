@@ -76,42 +76,58 @@ class Backtester:
             # Calculate portfolio returns with validated data
             portfolio_returns = pd.Series(index=aligned_returns.index, dtype=float)
             
-            # Enhanced transaction cost handling with proper weight drift
-            initial_turnover = aligned_weights.abs().sum()
-            portfolio_returns.iloc[0] = aligned_returns.iloc[0].dot(aligned_weights) - transaction_cost * initial_turnover
-            
-            # Track portfolio evolution with improved weight drift handling
+            # Initialize portfolio weights and track evolution
             portfolio_weights = aligned_weights.copy()
-            cumulative_turnover = initial_turnover
+            cumulative_turnover = 0.0
             
-            for i in range(1, len(portfolio_returns)):
+            # Calculate initial portfolio value
+            portfolio_value = 1.0
+            
+            for i in range(len(portfolio_returns)):
                 try:
-                    # Calculate weight drift with validation
-                    returns_vector = aligned_returns.iloc[i-1]
+                    # Get current day's returns
+                    returns_vector = aligned_returns.iloc[i]
                     if returns_vector.isnull().any():
                         returns_vector = returns_vector.fillna(0)
-                        logging.warning(f"NaN returns at index {i-1}. Filled with 0.")
+                        logging.warning(f"NaN returns at index {i}. Filled with 0.")
                     
-                    # Calculate drifted weights based on previous day's returns
+                    # Calculate portfolio return before transaction costs
+                    daily_return = returns_vector.dot(portfolio_weights)
+                    
+                    # Update portfolio value
+                    portfolio_value *= (1 + daily_return)
+                    
+                    # Calculate new weights due to price changes
                     drifted_weights = portfolio_weights * (1 + returns_vector)
                     drifted_sum = drifted_weights.sum()
                     
                     if drifted_sum <= 0 or np.isnan(drifted_sum):
-                        logging.warning(f"Invalid drifted weights sum at index {i}. Using target weights.")
-                        drifted_weights = aligned_weights.copy()
+                        logging.warning(f"Invalid drifted weights sum at index {i}. Using previous weights.")
+                        drifted_weights = portfolio_weights.copy()
                     else:
                         drifted_weights = drifted_weights / drifted_sum
                     
-                    # Calculate turnover based on difference from target weights
-                    turnover = (aligned_weights - drifted_weights).abs().sum()
-                    cumulative_turnover += turnover
+                    # Check if rebalancing is needed (monthly)
+                    is_rebalancing_day = (i > 0) and (i % 21 == 0)
                     
-                    # Calculate returns with transaction costs
-                    daily_return = aligned_returns.iloc[i].dot(aligned_weights) - transaction_cost * turnover
-                    portfolio_returns.iloc[i] = daily_return
+                    if is_rebalancing_day:
+                        # Calculate turnover for rebalancing
+                        turnover = (aligned_weights - drifted_weights).abs().sum()
+                        cumulative_turnover += turnover
+                        
+                        # Apply transaction costs
+                        rebalancing_cost = transaction_cost * turnover
+                        portfolio_value *= (1 - rebalancing_cost)
+                        
+                        # Update weights to target weights
+                        portfolio_weights = aligned_weights.copy()
+                    else:
+                        portfolio_weights = drifted_weights
                     
-                    # Update weights for next iteration
-                    portfolio_weights = aligned_weights.copy()
+                    # Store the daily return including transaction costs
+                    portfolio_returns.iloc[i] = (portfolio_value - 1.0 if i == 0 else 
+                                                portfolio_returns.iloc[i-1] + daily_return - 
+                                                (rebalancing_cost if is_rebalancing_day else 0))
                     
                 except Exception as inner_e:
                     logging.error(f"Error at iteration {i}: {str(inner_e)}")
