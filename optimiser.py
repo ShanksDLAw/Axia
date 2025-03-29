@@ -84,12 +84,25 @@ class PortfolioOptimizer:
             price_symbols = set(self.price_data.columns)
             valid_symbols = sector_symbols.intersection(price_symbols)
             
+            # Log the number of valid symbols found
+            logging.info(f"Found {len(valid_symbols)} valid symbols with both price data and sector information")
+            
             if not valid_symbols:
-                raise ValueError("No valid symbols found with both price data and sector information")
+                logging.warning("No valid symbols found with both price data and sector information. Attempting fallback strategy.")
+                # Fallback to using all available price data symbols
+                valid_symbols = price_symbols
+                if not valid_symbols:
+                    raise ValueError("No valid symbols found in price data")
             
             # Filter data to use only valid symbols
             filtered_price_data = self.price_data[list(valid_symbols)]
             filtered_returns = self.expected_returns[list(valid_symbols)]
+            
+            # Ensure we have enough data for optimization
+            min_symbols = 10  # Minimum number of symbols required
+            if len(valid_symbols) < min_symbols:
+                logging.warning(f"Insufficient number of valid symbols ({len(valid_symbols)} < {min_symbols}). Using relaxed constraints.")
+                constraints['max_sector'] = min(1.0, constraints.get('max_sector', 0.3) * 2)  # Relax sector constraints
                 
             # Enhanced covariance estimation with multi-factor shrinkage and robust validation
             try:
@@ -169,28 +182,65 @@ class PortfolioOptimizer:
                 except Exception:
                     continue
             
-            # Convert processed data to required format
+            # Convert processed data to required format with validation
             sector_counts = {k: v['count'] for k, v in sector_data.items()}
-            sector_vols = {k: v['vol_sum'] / v['count'] if v['count'] > 0 else 0 
-                          for k, v in sector_data.items()}
-            sector_returns = {k: np.mean(v['returns']) if v['returns'] else 0 
-                             for k, v in sector_data.items()}
-                        
-            # Validate sector data
-            if not sector_counts:
-                raise ValueError("No valid sectors found after processing")
             
-            # Calculate average sector metrics
-            for sector in sector_counts:
-                if sector_counts[sector] > 0:
-                    sector_vols[sector] /= sector_counts[sector]
-                    if sector_returns[sector]:
-                        sector_returns[sector] = np.mean(sector_returns[sector])
+            # Log sector distribution
+            logging.info(f"Sector distribution: {sector_counts}")
+            
+            # Handle case where no sectors are found
+            if not sector_counts:
+                logging.warning("No valid sectors found. Creating default sector allocation.")
+                # Create a default sector allocation
+                default_sector = "Uncategorized"
+                sector_counts = {default_sector: len(valid_symbols)}
+                # Assign all symbols to default sector
+                for symbol in valid_symbols:
+                    self.normalized_sectors[symbol] = default_sector
+            
+            # Calculate sector metrics with robust error handling
+            sector_vols = {}
+            sector_returns = {}
+            for sector, count in sector_counts.items():
+                try:
+                    # Get symbols in this sector
+                    sector_symbols = [s for s, sec in self.normalized_sectors.items() if sec == sector and s in valid_symbols]
+                    if not sector_symbols:
+                        continue
+                        
+                    # Calculate sector volatility
+                    sector_returns_data = filtered_returns[sector_symbols]
+                    sector_vols[sector] = np.std(sector_returns_data) if len(sector_returns_data) > 0 else np.median(filtered_returns.std())
+                    
+                    # Calculate sector returns
+                    sector_returns[sector] = np.mean(sector_returns_data) if len(sector_returns_data) > 0 else np.median(filtered_returns)
+                except Exception as e:
+                    logging.warning(f"Error calculating metrics for sector {sector}: {str(e)}")
+                    # Use median values as fallback
+                    sector_vols[sector] = np.median([v for v in sector_vols.values() if v > 0] or [0.1])
+                    sector_returns[sector] = np.median([r for r in sector_returns.values() if r != 0] or [0.05])
 
             # Calculate adaptive sector limits with enhanced validation and volatility scaling
             num_sectors = len(sector_counts)
             if num_sectors == 0:
-                raise ValueError("No valid sectors found for optimization")
+                logging.error("No valid sectors found for optimization, initiating HRP fallback")
+                # Use Hierarchical Risk Parity as fallback
+                try:
+                    hrp = HRPOpt(returns=filtered_returns)
+                    weights = hrp.optimize()
+                    metrics = {
+                        'expected_return': np.sum(filtered_returns.mean() * weights),
+                        'volatility': np.sqrt(np.dot(weights.T, np.dot(reg_cov_matrix, weights))),
+                        'sharpe_ratio': np.sum(filtered_returns.mean() * weights) / np.sqrt(np.dot(weights.T, np.dot(reg_cov_matrix, weights))),
+                        'diversification_ratio': len([w for w in weights.values() if w > 0.01])
+                    }
+                    logging.info("HRP fallback optimization successful")
+                    return weights, metrics
+                except Exception as e:
+                    logging.error(f"HRP fallback failed: {str(e)}")
+                    # Ultimate fallback: equal weight portfolio
+                    weights = {symbol: 1.0/len(valid_symbols) for symbol in valid_symbols}
+                    return weights, {'warning': 'Using equal weight fallback allocation'}
                 
             base_max = min(0.3, constraints.get('max_sector', 0.3))
             
@@ -1059,12 +1109,25 @@ class PortfolioOptimizer:
             price_symbols = set(self.price_data.columns)
             valid_symbols = sector_symbols.intersection(price_symbols)
             
+            # Log the number of valid symbols found
+            logging.info(f"Found {len(valid_symbols)} valid symbols with both price data and sector information")
+            
             if not valid_symbols:
-                raise ValueError("No valid symbols found with both price data and sector information")
+                logging.warning("No valid symbols found with both price data and sector information. Attempting fallback strategy.")
+                # Fallback to using all available price data symbols
+                valid_symbols = price_symbols
+                if not valid_symbols:
+                    raise ValueError("No valid symbols found in price data")
             
             # Filter data to use only valid symbols
             filtered_price_data = self.price_data[list(valid_symbols)]
             filtered_returns = self.expected_returns[list(valid_symbols)]
+            
+            # Ensure we have enough data for optimization
+            min_symbols = 10  # Minimum number of symbols required
+            if len(valid_symbols) < min_symbols:
+                logging.warning(f"Insufficient number of valid symbols ({len(valid_symbols)} < {min_symbols}). Using relaxed constraints.")
+                constraints['max_sector'] = min(1.0, constraints.get('max_sector', 0.3) * 2)  # Relax sector constraints
                 
             # Enhanced covariance estimation with multi-factor shrinkage and robust validation
             try:
@@ -1144,28 +1207,65 @@ class PortfolioOptimizer:
                 except Exception:
                     continue
             
-            # Convert processed data to required format
+            # Convert processed data to required format with validation
             sector_counts = {k: v['count'] for k, v in sector_data.items()}
-            sector_vols = {k: v['vol_sum'] / v['count'] if v['count'] > 0 else 0 
-                          for k, v in sector_data.items()}
-            sector_returns = {k: np.mean(v['returns']) if v['returns'] else 0 
-                             for k, v in sector_data.items()}
-                        
-            # Validate sector data
-            if not sector_counts:
-                raise ValueError("No valid sectors found after processing")
             
-            # Calculate average sector metrics
-            for sector in sector_counts:
-                if sector_counts[sector] > 0:
-                    sector_vols[sector] /= sector_counts[sector]
-                    if sector_returns[sector]:
-                        sector_returns[sector] = np.mean(sector_returns[sector])
+            # Log sector distribution
+            logging.info(f"Sector distribution: {sector_counts}")
+            
+            # Handle case where no sectors are found
+            if not sector_counts:
+                logging.warning("No valid sectors found. Creating default sector allocation.")
+                # Create a default sector allocation
+                default_sector = "Uncategorized"
+                sector_counts = {default_sector: len(valid_symbols)}
+                # Assign all symbols to default sector
+                for symbol in valid_symbols:
+                    self.normalized_sectors[symbol] = default_sector
+            
+            # Calculate sector metrics with robust error handling
+            sector_vols = {}
+            sector_returns = {}
+            for sector, count in sector_counts.items():
+                try:
+                    # Get symbols in this sector
+                    sector_symbols = [s for s, sec in self.normalized_sectors.items() if sec == sector and s in valid_symbols]
+                    if not sector_symbols:
+                        continue
+                        
+                    # Calculate sector volatility
+                    sector_returns_data = filtered_returns[sector_symbols]
+                    sector_vols[sector] = np.std(sector_returns_data) if len(sector_returns_data) > 0 else np.median(filtered_returns.std())
+                    
+                    # Calculate sector returns
+                    sector_returns[sector] = np.mean(sector_returns_data) if len(sector_returns_data) > 0 else np.median(filtered_returns)
+                except Exception as e:
+                    logging.warning(f"Error calculating metrics for sector {sector}: {str(e)}")
+                    # Use median values as fallback
+                    sector_vols[sector] = np.median([v for v in sector_vols.values() if v > 0] or [0.1])
+                    sector_returns[sector] = np.median([r for r in sector_returns.values() if r != 0] or [0.05])
 
             # Calculate adaptive sector limits with enhanced validation and volatility scaling
             num_sectors = len(sector_counts)
             if num_sectors == 0:
-                raise ValueError("No valid sectors found for optimization")
+                logging.error("No valid sectors found for optimization, initiating HRP fallback")
+                # Use Hierarchical Risk Parity as fallback
+                try:
+                    hrp = HRPOpt(returns=filtered_returns)
+                    weights = hrp.optimize()
+                    metrics = {
+                        'expected_return': np.sum(filtered_returns.mean() * weights),
+                        'volatility': np.sqrt(np.dot(weights.T, np.dot(reg_cov_matrix, weights))),
+                        'sharpe_ratio': np.sum(filtered_returns.mean() * weights) / np.sqrt(np.dot(weights.T, np.dot(reg_cov_matrix, weights))),
+                        'diversification_ratio': len([w for w in weights.values() if w > 0.01])
+                    }
+                    logging.info("HRP fallback optimization successful")
+                    return weights, metrics
+                except Exception as e:
+                    logging.error(f"HRP fallback failed: {str(e)}")
+                    # Ultimate fallback: equal weight portfolio
+                    weights = {symbol: 1.0/len(valid_symbols) for symbol in valid_symbols}
+                    return weights, {'warning': 'Using equal weight fallback allocation'}
                 
             base_max = min(0.3, constraints.get('max_sector', 0.3))
             

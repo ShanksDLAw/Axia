@@ -169,7 +169,10 @@ if st.button("Run Analysis"):
         try:
             import json
             import os
+            import smtplib
             from datetime import datetime
+            from email.mime.text import MIMEText
+            from email.mime.multipart import MIMEMultipart
             
             # Create feedback directory if it doesn't exist
             feedback_dir = os.path.join(os.path.dirname(__file__), 'feedback')
@@ -185,6 +188,45 @@ if st.button("Run Analysis"):
             # Save feedback to file
             with open(filepath, 'w') as f:
                 json.dump(feedback_data, f, indent=4)
+            
+            # Send email notification
+            try:
+                # Email configuration
+                sender_email = "your-app-email@gmail.com"  # Replace with your app's email
+                receiver_email = "animicart@gmail.com"
+                app_password = os.environ.get('EMAIL_APP_PASSWORD')  # Set this in your environment variables
+                
+                if not app_password:
+                    logging.warning("Email app password not found in environment variables")
+                    return True  # Continue with success even if email fails
+                
+                # Create email message
+                msg = MIMEMultipart()
+                msg['From'] = sender_email
+                msg['To'] = receiver_email
+                msg['Subject'] = f"New Axia Feedback - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                
+                # Format feedback content
+                email_content = f"""New feedback received from Axia:
+                
+User Experience Rating: {feedback_data['user_experience']}/5
+Feedback Text: {feedback_data['feedback_text']}
+Custom Model Preference: {feedback_data['custom_model_preference']}
+Preferred Features: {', '.join(feedback_data['preferred_features']) if feedback_data['preferred_features'] else 'None'}
+User Email: {feedback_data['user_email']}
+                """
+                
+                msg.attach(MIMEText(email_content, 'plain'))
+                
+                # Send email
+                with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                    server.login(sender_email, app_password)
+                    server.send_message(msg)
+                    
+                logging.info("Feedback email sent successfully")
+            except Exception as email_error:
+                logging.error(f"Failed to send feedback email: {str(email_error)}")
+                # Continue with success even if email fails
                 
             return True
         except Exception as e:
