@@ -259,7 +259,7 @@ class PortfolioOptimizer:
 
             if not success:
                 # Enhanced multi-stage fallback system with hierarchical optimization approaches
-                logging.info("Initiating enhanced fallback system")
+                logging.info("Initiating fallback optimization strategy") enhanced fallback system")
                 
                 # Stage 1: Advanced Risk Parity with correlation adjustment
                 try:
@@ -541,7 +541,7 @@ class PortfolioOptimizer:
             return weights, portfolio_metrics
         except Exception as e:
             logging.error(f"Defensive strategy failed: {str(e)}")
-            logging.info("Initiating enhanced defensive fallback system")
+            logging.info("Initiating fallback optimization strategy") enhanced defensive fallback system")
             
             # Multi-stage fallback system for defensive strategy
             try:
@@ -1212,7 +1212,7 @@ class PortfolioOptimizer:
 
             if not success:
                 # Enhanced multi-stage fallback system with hierarchical optimization approaches
-                logging.info("Initiating enhanced fallback system")
+                logging.info("Initiating fallback optimization strategy") enhanced fallback system")
                 
                 # Stage 1: Advanced Risk Parity with correlation adjustment
                 try:
@@ -1494,4 +1494,4 @@ class PortfolioOptimizer:
             return weights, portfolio_metrics
         except Exception as e:
             logging.error(f"Balanced strategy failed: {str(e)}")
-            logging.info("Initiating
+            logging.info("Initiating fallback optimization strategy")
