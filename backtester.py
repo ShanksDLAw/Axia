@@ -26,12 +26,23 @@ class Backtester:
             weights_series = pd.Series(weights)
             common_assets = self.returns.columns.intersection(weights_series.index)
             
+            # Enhanced validation for common assets
             if len(common_assets) == 0:
-                raise ValueError("No common assets between weights and returns data")
+                missing_assets = set(weights_series.index) - set(self.returns.columns)
+                available_assets = set(self.returns.columns)
+                error_msg = f"No common assets between weights and returns data.\n"
+                error_msg += f"Missing assets: {missing_assets}\n"
+                error_msg += f"Available assets: {available_assets}"
+                raise ValueError(error_msg)
                 
-            # Align and validate data
+            # Align and validate data with proper error handling
             aligned_returns = self.returns[common_assets]
             aligned_weights = weights_series[common_assets]
+            
+            # Normalize weights if needed
+            if not np.isclose(aligned_weights.sum(), 1.0, rtol=1e-3):
+                aligned_weights = aligned_weights / aligned_weights.sum()
+                logging.warning(f"Weights were automatically normalized to sum to 1.0")
             
             if not np.isclose(aligned_weights.sum(), 1.0, rtol=1e-3):
                 logging.warning(f"Portfolio weights sum to {aligned_weights.sum():.4f}, not 1.0")
