@@ -20,13 +20,31 @@ class Backtester:
     def run_backtest(self, weights: dict[str, float], 
                     risk_free_rate: float = 0.03, 
                     transaction_cost: float = 0.0001) -> dict:
-        """Run backtest with transaction costs and enhanced metrics"""
+        """Run backtest with transaction costs and enhanced metrics with improved validation."""
         try:
+            # Validate input weights
+            if not weights:
+                raise ValueError("Empty weights dictionary provided")
+            
+            # Filter out invalid weights and log warnings
+            valid_weights = {}
+            for symbol, weight in weights.items():
+                if not isinstance(weight, (int, float)) or np.isnan(weight):
+                    logging.warning(f"Invalid weight for {symbol}: {weight}. Skipping.")
+                    continue
+                if weight < 0:
+                    logging.warning(f"Negative weight for {symbol}: {weight}. Setting to 0.")
+                    continue
+                valid_weights[symbol] = weight
+            
+            if not valid_weights:
+                raise ValueError("No valid weights after filtering")
+            
             # Create weights series and align with returns data
-            weights_series = pd.Series(weights)
+            weights_series = pd.Series(valid_weights)
             common_assets = self.returns.columns.intersection(weights_series.index)
             
-            # Enhanced validation for common assets
+            # Enhanced validation for common assets with detailed error message
             if len(common_assets) == 0:
                 missing_assets = set(weights_series.index) - set(self.returns.columns)
                 available_assets = set(self.returns.columns)
@@ -34,57 +52,121 @@ class Backtester:
                 error_msg += f"Missing assets: {missing_assets}\n"
                 error_msg += f"Available assets: {available_assets}"
                 raise ValueError(error_msg)
-                
+            
+            if len(common_assets) < len(weights_series):
+                excluded_assets = set(weights_series.index) - set(common_assets)
+                logging.warning(f"Some assets were excluded due to missing data: {excluded_assets}")
+            
             # Align and validate data with proper error handling
             aligned_returns = self.returns[common_assets]
             aligned_weights = weights_series[common_assets]
             
-            # Normalize weights if needed
+            # Normalize weights with validation
             if not np.isclose(aligned_weights.sum(), 1.0, rtol=1e-3):
+                if aligned_weights.sum() <= 0:
+                    raise ValueError("Sum of weights must be positive")
                 aligned_weights = aligned_weights / aligned_weights.sum()
-                logging.warning(f"Weights were automatically normalized to sum to 1.0")
+                logging.info(f"Weights normalized. Original sum: {weights_series[common_assets].sum():.4f}")
             
-            if not np.isclose(aligned_weights.sum(), 1.0, rtol=1e-3):
-                logging.warning(f"Portfolio weights sum to {aligned_weights.sum():.4f}, not 1.0")
+            # Validate returns data
+            if aligned_returns.isnull().any().any():
+                logging.warning("NaN values found in returns data. Filling with 0.")
+                aligned_returns = aligned_returns.fillna(0)
             
-            # Calculate portfolio returns with aligned data
+            # Calculate portfolio returns with validated data
             portfolio_returns = aligned_returns.dot(aligned_weights)
             
-            # Calculate transaction costs (0.01% per trade)
-            turnover = aligned_weights.abs().sum()  # Initial allocation
-            portfolio_returns.iloc[0] -= transaction_cost * turnover
+            # Enhanced transaction cost handling
+            initial_turnover = aligned_weights.abs().sum()
+            portfolio_returns.iloc[0] -= transaction_cost * initial_turnover
             
-            # Ongoing turnover calculation with proper weight alignment
-            # Initialize portfolio weights that will be updated over time
+            # Track portfolio evolution with improved weight drift handling
             portfolio_weights = aligned_weights.copy()
+            cumulative_turnover = initial_turnover
             
             for i in range(1, len(portfolio_returns)):
-                # Calculate how weights drift due to returns
-                drifted_weights = portfolio_weights * (1 + aligned_returns.iloc[i-1])
-                drifted_weights = drifted_weights / drifted_weights.sum()  # Normalize to ensure sum = 1
-                
-                # Calculate turnover as the absolute difference between target weights and drifted weights
-                turnover = (aligned_weights - drifted_weights).abs().sum()
-                portfolio_returns.iloc[i] -= transaction_cost * turnover
-                
-                # Update portfolio weights for next iteration
-                portfolio_weights = aligned_weights.copy()
+                try:
+                    # Calculate weight drift with validation
+                    returns_vector = aligned_returns.iloc[i-1]
+                    if returns_vector.isnull().any():
+                        returns_vector = returns_vector.fillna(0)
+                        logging.warning(f"NaN returns at index {i-1}. Filled with 0.")
+                    
+                    drifted_weights = portfolio_weights * (1 + returns_vector)
+                    drifted_sum = drifted_weights.sum()
+                    
+                    if drifted_sum <= 0:
+                        logging.warning(f"Invalid drifted weights sum at index {i}. Using previous weights.")
+                        drifted_weights = portfolio_weights
+                    else:
+                        drifted_weights = drifted_weights / drifted_sum
+                    
+                    # Calculate and apply transaction costs
+                    turnover = (aligned_weights - drifted_weights).abs().sum()
+                    cumulative_turnover += turnover
+                    portfolio_returns.iloc[i] -= transaction_cost * turnover
+                    
+                    # Update for next iteration
+                    portfolio_weights = aligned_weights.copy()
+                    
+                except Exception as inner_e:
+                    logging.error(f"Error at iteration {i}: {str(inner_e)}")
+                    portfolio_returns.iloc[i] = 0
             
             # Calculate comprehensive metrics
             metrics = self._calculate_metrics(portfolio_returns, risk_free_rate)
-            metrics['Sector Allocation'] = self._analyze_sectors({k: v for k, v in weights.items() if k in common_assets})
+            metrics.update({
+                'Sector Allocation': self._analyze_sectors({k: v for k, v in weights.items() if k in common_assets}),
+                'Number of Assets': len(common_assets),
+                'Cumulative Turnover': cumulative_turnover,
+                'Average Daily Turnover': cumulative_turnover / len(portfolio_returns)
+            })
             
             return metrics
+            
         except Exception as e:
             logging.error(f"Backtest failed: {str(e)}")
-            raise
+            return {
+                'error': str(e),
+                'Total Return': 0.0,
+                'Annualized Return': 0.0,
+                'Annualized Volatility': 0.0,
+                'Sharpe Ratio': 0.0,
+                'Sortino Ratio': 0.0,
+                'Max Drawdown': 0.0,
+                'Sector Allocation': {'Unknown': 1.0}
+            }
     
     def _analyze_sectors(self, weights: dict[str, float]) -> dict[str, float]:
-        """Analyze sector allocation of the portfolio"""
-        sectors = defaultdict(float)
-        for symbol, weight in weights.items():
-            sectors[self.sectors.get(symbol, 'Unknown')] += weight
-        return dict(sectors)
+        """Analyze sector allocation of the portfolio with enhanced validation."""
+        try:
+            sectors = defaultdict(float)
+            total_weight = 0.0
+            
+            # Process each symbol and accumulate sector weights
+            for symbol, weight in weights.items():
+                if not isinstance(weight, (int, float)) or np.isnan(weight):
+                    logging.warning(f"Invalid weight for {symbol}: {weight}. Skipping.")
+                    continue
+                    
+                sector = self.sectors.get(symbol)
+                if sector is None:
+                    logging.warning(f"No sector found for {symbol}. Allocating to 'Unknown'.")
+                    sector = 'Unknown'
+                
+                sectors[sector] += weight
+                total_weight += weight
+            
+            # Normalize sector weights if total weight is not close to 1.0
+            if not np.isclose(total_weight, 1.0, rtol=1e-3) and total_weight > 0:
+                for sector in sectors:
+                    sectors[sector] /= total_weight
+                logging.info(f"Sector weights normalized. Original total: {total_weight:.4f}")
+            
+            return dict(sectors)
+        except Exception as e:
+            logging.error(f"Error in sector analysis: {str(e)}")
+            return {'Unknown': 1.0}
 
     def _calculate_metrics(self, portfolio_returns: pd.Series, risk_free_rate: float = 0.03) -> dict:
         """Calculate comprehensive portfolio performance metrics"""
