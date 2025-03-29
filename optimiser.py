@@ -541,7 +541,7 @@ class PortfolioOptimizer:
             return weights, portfolio_metrics
         except Exception as e:
             logging.error(f"Defensive strategy failed: {str(e)}")
-            logging.info("Initiating fallback optimization strategy") enhanced defensive fallback system")
+            logging.info("Initiating enhanced defensive fallback optimization strategy")
             
             # Multi-stage fallback system for defensive strategy
             try:
