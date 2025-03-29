@@ -14,6 +14,43 @@ class PortfolioOptimizer:
     def __init__(self, price_data, returns_df):
         self.price_data = price_data
         self.returns_df = returns_df
+        # Calculate expected returns using historical mean
+        self.expected_returns = returns_df.mean()
+        # Initialize sectors attribute
+        self.sectors = {}
+
+    def optimize(self, regime: str, risk_appetite: str) -> tuple[dict[str, float], dict]:
+        """Optimize portfolio based on investment regime and risk appetite.
+        
+        Args:
+            regime: Investment regime ('Bullish', 'Bearish', or 'Neutral')
+            risk_appetite: Risk appetite ('Conservative', 'Moderate', or 'Aggressive')
+            
+        Returns:
+            tuple: (optimized weights dictionary, portfolio metrics dictionary)
+        """
+        try:
+            # Set base constraints based on risk appetite
+            constraints = {
+                'max_sector': 0.35 if risk_appetite == 'Aggressive' else (0.25 if risk_appetite == 'Moderate' else 0.2),
+                'min_bonds': 0.3 if risk_appetite == 'Conservative' else (0.2 if risk_appetite == 'Moderate' else 0.1)
+            }
+            
+            # Get optimized weights based on regime
+            if regime == 'Bearish':
+                weights, metrics = self._defensive_strategy(constraints)
+            else:
+                # For now, default to defensive strategy
+                # TODO: Implement aggressive and balanced strategies
+                weights, metrics = self._defensive_strategy(constraints)
+            
+            return weights, metrics
+            
+        except Exception as e:
+            logging.error(f"Portfolio optimization failed: {str(e)}")
+            # Return safe fallback allocation
+            return {}, {"warning": f"Optimization failed: {str(e)}. Using fallback allocation."}
+
 
     def _defensive_strategy(self, constraints: dict) -> tuple[dict[str, float], dict[str, float]]:
         """Defensive portfolio optimization with enhanced constraint handling and risk management"""
