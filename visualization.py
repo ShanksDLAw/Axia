@@ -4,12 +4,14 @@ import pandas as pd
 from plotly.subplots import make_subplots
 
 def create_portfolio_dashboard(weights_data, sector_weights, risk_metrics):
-    # Create figure with secondary y-axis
+    # Create figure with optimized layout
     fig = make_subplots(
         rows=2, cols=2,
-        specs=[[{"type": "pie"}, {"type": "bar"}],
+        specs=[[{"type": "pie", "rowspan": 1}, {"type": "bar"}],
                [{"type": "treemap"}, {"type": "indicator"}]],
-        subplot_titles=("Sector Allocation", "Top 10 Holdings", "Asset Allocation Treemap", "Risk Metrics")
+        subplot_titles=("Sector Allocation", "Top 10 Holdings", "Asset Allocation Treemap", "Risk Metrics"),
+        vertical_spacing=0.15,
+        horizontal_spacing=0.1
     )
     
     # 1. Sector Allocation (Pie Chart)
@@ -135,17 +137,45 @@ def create_portfolio_dashboard(weights_data, sector_weights, risk_metrics):
         xref="paper", yref="paper"
     )
     
-    # Update layout with improved styling
+    # Update layout with improved styling and spacing
     fig.update_layout(
-        height=1000,
+        height=800,
         showlegend=True,
         title_text="Portfolio Analysis Dashboard",
+        title_x=0.5,
         template="plotly_dark",
-        margin=dict(t=50, l=25, r=25, b=25),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        margin=dict(t=80, l=50, r=50, b=50, pad=4),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=10)
+        ),
+        uniformtext=dict(minsize=10, mode='hide'),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)'
     )
     
     # Update axes for better readability
-    fig.update_xaxes(title_text="Weight (%)", row=1, col=2)
+    fig.update_xaxes(title_text="Weight (%)", row=1, col=2, showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
+    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
+    
+    # Adjust pie chart settings for better visibility
+    fig.update_traces(
+        textposition='outside',
+        textinfo='label+percent',
+        hoverinfo='label+percent',
+        row=1, col=1
+    )
+    
+    # Enhance bar chart appearance
+    fig.update_traces(
+        texttemplate='%{text:.2f}%',
+        textposition='inside',
+        hovertemplate='%{y}: %{x:.2f}%<extra></extra>',
+        row=1, col=2
+    )
     
     return fig

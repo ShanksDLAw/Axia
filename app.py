@@ -92,7 +92,9 @@ if st.button("Run Analysis"):
     
     with metrics_col1:
         st.metric("Expected Return", f"{portfolio_metrics.get('expected_return', 0.0):.2%}")
-        st.metric("Diversification", f"{int(portfolio_metrics.get('effective_positions', portfolio_metrics.get('diversification_ratio', 0)))} assets")
+        # Calculate actual number of assets with non-zero weights
+        active_assets = sum(1 for w in weights.values() if w > 0.0001)
+        st.metric("Diversification", f"{active_assets} assets")
     
     with metrics_col2:
         st.metric("Volatility", f"{portfolio_metrics.get('volatility', 0.0):.2%}")
@@ -134,10 +136,11 @@ if st.button("Run Analysis"):
             risk_metrics={
                 'sharpe_ratio': results['Sharpe Ratio'],
                 'total_return': results['Total Return'],
-                'max_drawdown': results['Max Drawdown']
+                'max_drawdown': results['Max Drawdown'],
+                'volatility': portfolio_metrics.get('volatility', 0.0)
             }
         )
-        st.plotly_chart(dashboard, use_container_width=True)
+        st.plotly_chart(dashboard, use_container_width=True, theme="streamlit")
         
     except Exception as e:
         st.error(f"Error displaying portfolio analysis: {str(e)}")
