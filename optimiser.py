@@ -145,36 +145,48 @@ class PortfolioOptimizer:
             
             constraints = risk_constraints.get(risk_appetite, risk_constraints['Moderate'])
             
-            # Try intermediate fallback strategies before resorting to equal weights
+            # Try optimization with adaptive constraint relaxation
             try:
                 result = None
-                if regime == 'Bullish':
-                    result = self._growth_strategy(constraints)
-                elif regime == 'Bearish':
-                    result = self._defensive_strategy(constraints)
-                else:
-                    result = self._balanced_strategy(constraints)
+                relaxation_factors = [1.0, 1.1, 1.2, 1.3, 1.4, 1.5]  # Progressive relaxation
+                
+                for factor in relaxation_factors:
+                    # Adjust constraints with relaxation factor
+                    relaxed_constraints = constraints.copy()
+                    relaxed_constraints['min_bonds'] = max(0.05, constraints['min_bonds'] / factor)
+                    relaxed_constraints['max_equity'] = min(0.95, constraints['max_equity'] * factor)
+                    relaxed_constraints['max_sector'] = min(0.4, constraints['max_sector'] * factor)
+                    relaxed_constraints['target_vol'] = constraints['target_vol'] * factor
                     
-                # Validate that we have a proper tuple with weights and metrics
-                if result is None or not isinstance(result, tuple) or len(result) != 2:
-                    logging.error(f"Strategy returned invalid result: {result}")
-                    # Try intermediate fallback with HRP before equal weights
                     try:
-                        # Ensure we don't try to unpack an invalid result
-                        weights, metrics = None, None
-                        logging.info(f"Attempting HRP fallback for {regime} regime")
-                        # Prepare returns data with robust preprocessing
-                        clean_returns = self.returns_df.copy()
-                        clean_returns = clean_returns.clip(
-                            clean_returns.quantile(0.05), 
-                            clean_returns.quantile(0.95)
-                        )
-                        clean_returns = clean_returns.fillna(method='ffill').fillna(0)
-                        
-                        # Initialize HRP with enhanced stability
-                        from pypfopt import HRPOpt
-                        hrp = HRPOpt(clean_returns)
-                        hrp_weights = hrp.optimize()
+                        if regime == 'Bullish':
+                            result = self._growth_strategy(relaxed_constraints)
+                        elif regime == 'Bearish':
+                            result = self._defensive_strategy(relaxed_constraints)
+                        else:
+                            result = self._balanced_strategy(relaxed_constraints)
+                            
+                        if result is not None and isinstance(result, tuple) and len(result) == 2:
+                            logging.info(f"Optimization succeeded with relaxation factor {factor}")
+                            break
+                    except Exception as e:
+                        logging.warning(f"Attempt with relaxation factor {factor} failed: {str(e)}")
+                        continue
+                
+                # If all optimization attempts fail, try HRP fallback
+                if result is None or not isinstance(result, tuple) or len(result) != 2:
+                    logging.warning("All optimization attempts failed, trying HRP fallback")
+                    # Prepare returns data with robust preprocessing
+                    clean_returns = self.returns_df.copy()
+                    clean_returns = clean_returns.clip(
+                        clean_returns.quantile(0.01), 
+                        clean_returns.quantile(0.99)
+                    )
+                    clean_returns = clean_returns.fillna(method='ffill').fillna(method='bfill').fillna(0)
+                    
+                    # Initialize HRP with enhanced stability
+                    hrp = HRPOpt(clean_returns)
+                    hrp_weights = hrp.optimize()
                         
                         # Apply regime-specific adjustments to HRP weights
                         adjusted_weights = {}
@@ -406,6 +418,11 @@ class PortfolioOptimizer:
                 'Energy': 'Energy',
                 'Industrials': 'Industrials'
             }
+            
+            # Initialize optimization parameters with adaptive scaling
+            min_weight = 0.01  # Minimum weight per asset
+            max_weight = min(0.4, constraints.get('max_sector', 0.35))  # Maximum weight per asset
+            target_vol = constraints.get('target_vol', 0.18)  # Target volatility
             
             # Normalize sectors with enhanced validation
             normalized_sectors = {}
@@ -881,17 +898,33 @@ class PortfolioOptimizer:
                                             sector_upper=relaxed_upper,
                                             sector_lower=relaxed_lower)
                     
-                    # Relaxed asset constraints
-                    if bond_symbols:
-                        ef.add_constraint(lambda w: sum(w[i] for i in bond_indices) >= constraints['min_bonds'] * 0.7)
-                        if equity_symbols:
-                            ef.add_constraint(lambda w: sum(w[i] for i in equity_indices) <= constraints['max_equity'] * 1.2)
-                    
-                    ef.add_objective(objective_functions.L2_reg, gamma=l2_gamma * 0.8)
-                    ef.efficient_return(target_return)
-                    raw_weights = ef.clean_weights()
-                    if all(w >= 0 for w in raw_weights.values()):
-                        success = True
+                    # Adaptive constraint relaxation
+                    relaxation_factors = [1.0, 0.8, 0.6, 0.4]  # Progressive relaxation
+                    for relaxation in relaxation_factors:
+                        try:
+                            # Apply relaxed constraints with validation
+                            if bond_symbols:
+                                min_bonds = max(0.05, constraints['min_bonds'] * relaxation)
+                                ef.add_constraint(lambda w: sum(w[i] for i in bond_indices) >= min_bonds)
+                                if equity_symbols:
+                                    max_equity = min(0.95, constraints['max_equity'] / relaxation)
+                                    ef.add_constraint(lambda w: sum(w[i] for i in equity_indices) <= max_equity)
+                            
+                            # Add regularization with adaptive scaling
+                            l2_scale = max(0.1, relaxation)
+                            ef.add_objective(objective_functions.L2_reg, gamma=l2_gamma * l2_scale)
+                            
+                            # Try optimization with current constraints
+                            ef.efficient_return(target_return * relaxation)
+                            raw_weights = ef.clean_weights()
+                            
+                            if all(w >= 0 for w in raw_weights.values()):
+                                success = True
+                                logging.info(f"Optimization succeeded with relaxation factor {relaxation}")
+                                break
+                        except Exception as e:
+                            logging.warning(f"Optimization attempt with relaxation {relaxation} failed: {str(e)}")
+                            continue
                 except Exception as e:
                     logging.warning(f"Efficient return optimization failed: {str(e)}")
                     
