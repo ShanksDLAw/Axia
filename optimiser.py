@@ -35,21 +35,43 @@ class PortfolioOptimizer:
             tuple: (optimized weights dictionary, portfolio metrics dictionary)
         """
         try:
-            # Set base constraints based on risk appetite
+            # Calculate momentum and volatility signals
+            returns_12m = self.returns_df.rolling(window=252).mean()
+            volatility_3m = self.returns_df.rolling(window=63).std() * np.sqrt(252)
+            momentum_score = returns_12m.iloc[-1] / volatility_3m.iloc[-1]
+            
+            # Set dynamic constraints based on risk appetite and market regime
             constraints = {
-                'max_sector': 0.35 if risk_appetite == 'Aggressive' else (0.25 if risk_appetite == 'Moderate' else 0.2),
-                'min_bonds': 0.3 if risk_appetite == 'Conservative' else (0.2 if risk_appetite == 'Moderate' else 0.1)
+                'max_sector': 0.45 if risk_appetite == 'Aggressive' else (0.35 if risk_appetite == 'Moderate' else 0.25),
+                'min_bonds': 0.15 if risk_appetite == 'Conservative' else (0.1 if risk_appetite == 'Moderate' else 0.05),
+                'max_position': 0.15 if risk_appetite == 'Aggressive' else (0.1 if risk_appetite == 'Moderate' else 0.05)
             }
             
-            # Get optimized weights based on regime
+            # Get optimized weights based on regime and risk appetite
             if regime == 'Bearish':
                 weights, metrics = self._defensive_strategy(constraints)
+            elif regime == 'Bullish' and risk_appetite in ['Moderate', 'Aggressive']:
+                weights, metrics = self._aggressive_strategy(constraints, momentum_score)
             else:
-                # For now, default to defensive strategy
-                # TODO: Implement aggressive and balanced strategies
-                weights, metrics = self._defensive_strategy(constraints)
+                weights, metrics = self._balanced_strategy(constraints, momentum_score)
             
-            return weights, metrics
+            # Apply dynamic volatility targeting
+            target_vol = 0.25 if risk_appetite == 'Aggressive' else (0.15 if risk_appetite == 'Moderate' else 0.10)
+            portfolio_vol = np.sqrt(self._calculate_portfolio_variance(weights))
+            vol_scalar = min(2.0, max(0.5, target_vol / portfolio_vol))
+            
+            # Scale weights and adjust cash position
+            scaled_weights = {k: v * vol_scalar for k, v in weights.items()}
+            cash_weight = max(0, 1 - sum(scaled_weights.values()))
+            if cash_weight > 0:
+                scaled_weights['CASH'] = cash_weight
+            
+            # Update metrics
+            metrics['volatility_target'] = target_vol
+            metrics['actual_volatility'] = portfolio_vol
+            metrics['cash_allocation'] = cash_weight
+            
+            return scaled_weights, metrics
             
         except Exception as e:
             logging.error(f"Portfolio optimization failed: {str(e)}")
@@ -57,6 +79,122 @@ class PortfolioOptimizer:
             return {}, {"warning": f"Optimization failed: {str(e)}. Using fallback allocation."}
 
 
+    def _calculate_portfolio_variance(self, weights: dict) -> float:
+        """Calculate portfolio variance using the covariance matrix."""
+        weight_array = np.array([weights.get(asset, 0) for asset in self.price_data.columns])
+        return weight_array.T @ risk_models.sample_cov(self.price_data) @ weight_array
+
+    def _calculate_expected_returns(self, momentum_score=None):
+        """Calculate expected returns using multiple factors."""
+        # Historical returns (exponentially weighted)
+        hist_returns = self.returns_df.ewm(halflife=126).mean().iloc[-1]
+        
+        # Momentum component
+        if momentum_score is not None:
+            momentum_factor = 0.5
+            expected_returns = hist_returns * (1 - momentum_factor) + momentum_score * momentum_factor
+        else:
+            expected_returns = hist_returns
+        
+        return expected_returns
+
+    def _aggressive_strategy(self, constraints: dict, momentum_score: pd.Series) -> tuple[dict[str, float], dict]:
+        """Aggressive portfolio optimization with momentum-based asset selection and enhanced risk management."""
+        try:
+            # Calculate expected returns with momentum
+            expected_returns = self._calculate_expected_returns(momentum_score)
+            
+            # Filter top momentum assets
+            top_momentum_threshold = np.percentile(momentum_score, 70)
+            high_momentum_assets = momentum_score[momentum_score >= top_momentum_threshold].index
+            
+            # Prepare optimization universe
+            optimization_universe = list(high_momentum_assets)
+            filtered_returns = expected_returns[optimization_universe]
+            
+            # Calculate risk model with higher emphasis on recent data
+            price_data_recent = self.price_data[optimization_universe].tail(126)  # Last 6 months
+            risk_model = risk_models.CovarianceShrinkage(
+                price_data_recent,
+                frequency=252
+            ).ledoit_wolf()
+            
+            # Set up efficient frontier with aggressive parameters
+            ef = EfficientFrontier(
+                filtered_returns,
+                risk_model,
+                weight_bounds=(0, constraints['max_position'])
+            )
+            
+            # Add objective functions with aggressive weights
+            ef.add_objective(objective_functions.L2_reg, gamma=0.1)  # Light regularization
+            ef.add_objective(objective_functions.MaxSharpe(risk_free_rate=0.02))  # Higher risk-free rate
+            
+            # Optimize and clean weights
+            weights = ef.optimize()
+            cleaned_weights = ef.clean_weights(cutoff=0.02)
+            
+            # Calculate portfolio metrics
+            metrics = {
+                'expected_return': ef.portfolio_performance()[0],
+                'volatility': ef.portfolio_performance()[1],
+                'sharpe_ratio': ef.portfolio_performance()[2],
+                'momentum_score': momentum_score[optimization_universe].mean(),
+                'num_assets': len([w for w in cleaned_weights.values() if w > 0.02])
+            }
+            
+            return cleaned_weights, metrics
+            
+        except Exception as e:
+            logging.error(f"Aggressive strategy optimization failed: {str(e)}")
+            return self._defensive_strategy(constraints)
+            
+    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series) -> tuple[dict[str, float], dict]:
+        """Balanced portfolio optimization with risk-adjusted momentum approach."""
+        try:
+            # Calculate expected returns with balanced momentum influence
+            expected_returns = self._calculate_expected_returns(momentum_score * 0.7)  # Reduced momentum influence
+            
+            # Filter assets with positive momentum
+            valid_assets = momentum_score[momentum_score > 0].index
+            filtered_returns = expected_returns[valid_assets]
+            
+            # Calculate risk model with balanced lookback
+            risk_model = risk_models.CovarianceShrinkage(
+                self.price_data[valid_assets],
+                frequency=252
+            ).ledoit_wolf()
+            
+            # Set up efficient frontier with balanced parameters
+            ef = EfficientFrontier(
+                filtered_returns,
+                risk_model,
+                weight_bounds=(0, constraints['max_position'])
+            )
+            
+            # Add balanced objective functions
+            ef.add_objective(objective_functions.L2_reg, gamma=0.5)  # Moderate regularization
+            ef.add_objective(objective_functions.MaxSharpe(risk_free_rate=0.015))  # Moderate risk-free rate
+            
+            # Optimize and clean weights
+            weights = ef.optimize()
+            cleaned_weights = ef.clean_weights(cutoff=0.01)
+            
+            # Calculate portfolio metrics
+            metrics = {
+                'expected_return': ef.portfolio_performance()[0],
+                'volatility': ef.portfolio_performance()[1],
+                'sharpe_ratio': ef.portfolio_performance()[2],
+                'momentum_score': momentum_score[valid_assets].mean(),
+                'num_assets': len([w for w in cleaned_weights.values() if w > 0.01])
+            }
+            
+            return cleaned_weights, metrics
+            
+        except Exception as e:
+            logging.error(f"Balanced strategy optimization failed: {str(e)}")
+            return self._defensive_strategy(constraints)
+            
     def _defensive_strategy(self, constraints: dict) -> tuple[dict[str, float], dict[str, float]]:
         """Defensive portfolio optimization with enhanced constraint handling and risk management"""
         try:
