@@ -54,14 +54,15 @@ class Backtester:
             turnover = aligned_weights.abs().sum()  # Initial allocation
             portfolio_returns.iloc[0] -= transaction_cost * turnover
             
-            # Ongoing turnover (simplified)
+            # Ongoing turnover calculation with proper weight alignment
             for i in range(1, len(portfolio_returns)):
-                turnover = (weights_series - portfolio_returns.iloc[i-1]).abs().sum()
+                # Calculate turnover based on aligned weights
+                turnover = (aligned_weights - aligned_weights * (1 + aligned_returns.iloc[i-1])).abs().sum()
                 portfolio_returns.iloc[i] -= transaction_cost * turnover
             
             # Calculate comprehensive metrics
-            metrics = self._calculate_metrics(portfolio_returns)
-            metrics['Sector Allocation'] = self._analyze_sectors(weights)
+            metrics = self._calculate_metrics(portfolio_returns, risk_free_rate)
+            metrics['Sector Allocation'] = self._analyze_sectors({k: v for k, v in weights.items() if k in common_assets})
             
             return metrics
         except Exception as e:
@@ -92,10 +93,12 @@ class Backtester:
             drawdowns = cum_returns / rolling_max - 1
             max_drawdown = drawdowns.min()
             
-            # Risk-adjusted metrics
-            excess_returns = portfolio_returns - risk_free_rate / 252
+            # Risk-adjusted metrics with proper annualization
+            daily_rf_rate = (1 + risk_free_rate) ** (1/252) - 1
+            excess_returns = portfolio_returns - daily_rf_rate
             sharpe_ratio = np.sqrt(252) * excess_returns.mean() / daily_vol if daily_vol != 0 else 0
-            sortino_ratio = np.sqrt(252) * excess_returns.mean() / (portfolio_returns[portfolio_returns < 0].std() or 1e-6)
+            downside_returns = portfolio_returns[portfolio_returns < daily_rf_rate]
+            sortino_ratio = np.sqrt(252) * excess_returns.mean() / (downside_returns.std() or 1e-6)
             
             return {
                 'Total Return': total_return,
