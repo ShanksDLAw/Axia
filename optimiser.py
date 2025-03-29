@@ -11,13 +11,14 @@ import logging
 
 
 class PortfolioOptimizer:
-    def __init__(self, price_data, returns_df):
+    def __init__(self, price_data, sectors):
         self.price_data = price_data
-        self.returns_df = returns_df
+        # Calculate returns from price data
+        self.returns_df = price_data.pct_change().dropna()
         # Calculate expected returns using historical mean
-        self.expected_returns = returns_df.mean()
+        self.expected_returns = self.returns_df.mean()
         # Initialize sectors attribute
-        self.sectors = {}
+        self.sectors = sectors
 
     def optimize(self, regime: str, risk_appetite: str) -> tuple[dict[str, float], dict]:
         """Optimize portfolio based on investment regime and risk appetite.
