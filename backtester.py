@@ -22,11 +22,25 @@ class Backtester:
                     transaction_cost: float = 0.0001) -> dict:
         """Run backtest with transaction costs and enhanced metrics"""
         try:
+            # Create weights series and align with returns data
             weights_series = pd.Series(weights)
-            portfolio_returns = self.returns.dot(weights_series)
+            common_assets = self.returns.columns.intersection(weights_series.index)
+            
+            if len(common_assets) == 0:
+                raise ValueError("No common assets between weights and returns data")
+                
+            # Align and validate data
+            aligned_returns = self.returns[common_assets]
+            aligned_weights = weights_series[common_assets]
+            
+            if not np.isclose(aligned_weights.sum(), 1.0, rtol=1e-3):
+                logging.warning(f"Portfolio weights sum to {aligned_weights.sum():.4f}, not 1.0")
+            
+            # Calculate portfolio returns with aligned data
+            portfolio_returns = aligned_returns.dot(aligned_weights)
             
             # Calculate transaction costs (0.01% per trade)
-            turnover = weights_series.abs().sum()  # Initial allocation
+            turnover = aligned_weights.abs().sum()  # Initial allocation
             portfolio_returns.iloc[0] -= transaction_cost * turnover
             
             # Ongoing turnover (simplified)
