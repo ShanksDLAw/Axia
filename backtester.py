@@ -74,11 +74,11 @@ class Backtester:
                 aligned_returns = aligned_returns.fillna(0)
             
             # Calculate portfolio returns with validated data
-            portfolio_returns = aligned_returns.dot(aligned_weights)
+            portfolio_returns = pd.Series(index=aligned_returns.index, dtype=float)
             
             # Enhanced transaction cost handling
             initial_turnover = aligned_weights.abs().sum()
-            portfolio_returns.iloc[0] -= transaction_cost * initial_turnover
+            portfolio_returns.iloc[0] = aligned_returns.iloc[0].dot(aligned_weights) - transaction_cost * initial_turnover
             
             # Track portfolio evolution with improved weight drift handling
             portfolio_weights = aligned_weights.copy()
@@ -104,7 +104,10 @@ class Backtester:
                     # Calculate and apply transaction costs
                     turnover = (aligned_weights - drifted_weights).abs().sum()
                     cumulative_turnover += turnover
-                    portfolio_returns.iloc[i] -= transaction_cost * turnover
+                    
+                    # Calculate returns with transaction costs
+                    daily_return = aligned_returns.iloc[i].dot(aligned_weights) - transaction_cost * turnover
+                    portfolio_returns.iloc[i] = daily_return
                     
                     # Update for next iteration
                     portfolio_weights = aligned_weights.copy()
