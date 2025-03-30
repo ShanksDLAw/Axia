@@ -396,7 +396,7 @@ class PortfolioOptimizer:
             logging.error(f"Aggressive strategy optimization failed: {str(e)}")
             return self._defensive_strategy(constraints)
             
-    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None) -> tuple[dict[str, float], dict]:
+    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None, risk_appetite: str = 'Moderate') -> tuple[dict[str, float], dict]:
         """Balanced portfolio optimization with risk-adjusted momentum approach.
         
         Args:
@@ -407,8 +407,8 @@ class PortfolioOptimizer:
             tuple: (optimized weights dictionary, portfolio metrics dictionary)
         """
         try:
-            # Get risk appetite from constraints or default to Moderate
-            risk_appetite = constraints.get('risk_appetite', 'Moderate')
+            # Get risk appetite from parameter or constraints
+            risk_appetite = risk_appetite or constraints.get('risk_appetite', 'Moderate')
             
             # Initialize momentum scores if not provided
             if momentum_score is None:
@@ -508,6 +508,9 @@ class PortfolioOptimizer:
     def _defensive_strategy(self, constraints: dict) -> tuple[dict[str, float], dict[str, float]]:
         """Defensive portfolio optimization with enhanced constraint handling and risk management"""
         try:
+            # Get risk appetite from constraints
+            risk_appetite = constraints.get('risk_appetite', 'Conservative')
+            
             # Ensure we have valid price data
             if self.price_data.empty:
                 raise ValueError("Empty price data")
