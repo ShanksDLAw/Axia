@@ -401,7 +401,7 @@ class PortfolioOptimizer:
             logging.error(f"Aggressive strategy optimization failed: {str(e)}")
             return self._defensive_strategy(constraints)
             
-    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series) -> tuple[dict[str, float], dict]:
+    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None) -> tuple[dict[str, float], dict]:
         """Balanced portfolio optimization with risk-adjusted momentum approach.
         
         Args:
@@ -740,13 +740,13 @@ class PortfolioOptimizer:
                     logging.info(f"Created balanced risk-based sectors: {dict((k, len(v)) for k, v in risk_based_sectors.items())}")
                     
                 except Exception as e:
-                            logging.warning(f"Error assigning sector for {asset}: {str(e)}")
-                            continue
+                    logging.warning(f"Error assigning sector for {asset}: {str(e)}")
+                    continue
                     
                     # Ensure each sector has at least some assets
                     min_assets_per_sector = max(3, len(valid_symbols) // 10)
                     for sector in ['Low_Vol', 'Mid_Vol', 'High_Vol']:
-                        if len(risk_based_sectors[sector]) < min_assets_per_sector:
+                        if sector not in risk_based_sectors or len(risk_based_sectors[sector]) < min_assets_per_sector:
                             logging.warning(f"Insufficient assets in {sector}. Adjusting thresholds.")
                             # Redistribute assets if a sector is too small
                             all_assets = [a for a in valid_symbols if a != 'CASH']
@@ -935,7 +935,7 @@ class PortfolioOptimizer:
                         sector_upper[sector] = min(0.6, base_max * 1.2) if risk_appetite == 'Conservative' else min(0.5, base_max * 1.1)
                     elif sector == 'Mid_Vol':
                         # Handle Mid_Vol sector with additional validation
-                        if count > 0:  # Only set constraints if sector has assets
+                        if sector in sector_counts and count > 0:  # Only set constraints if sector exists and has assets
                             sector_lower[sector] = 0.2 if risk_appetite != 'Aggressive' else 0.15
                             sector_upper[sector] = min(0.4, base_max * 1.1) if risk_appetite != 'Aggressive' else min(0.45, base_max * 1.2)
                         else:
@@ -1989,13 +1989,13 @@ class PortfolioOptimizer:
                     logging.info(f"Created balanced risk-based sectors: {dict((k, len(v)) for k, v in risk_based_sectors.items())}")
                     
                 except Exception as e:
-                            logging.warning(f"Error assigning sector for {asset}: {str(e)}")
-                            continue
+                    logging.warning(f"Error assigning sector for {asset}: {str(e)}")
+                    continue
                     
                     # Ensure each sector has at least some assets
                     min_assets_per_sector = max(3, len(valid_symbols) // 10)
                     for sector in ['Low_Vol', 'Mid_Vol', 'High_Vol']:
-                        if len(risk_based_sectors[sector]) < min_assets_per_sector:
+                        if sector not in risk_based_sectors or len(risk_based_sectors[sector]) < min_assets_per_sector:
                             logging.warning(f"Insufficient assets in {sector}. Adjusting thresholds.")
                             # Redistribute assets if a sector is too small
                             all_assets = [a for a in valid_symbols if a != 'CASH']
@@ -2184,7 +2184,7 @@ class PortfolioOptimizer:
                         sector_upper[sector] = min(0.6, base_max * 1.2) if risk_appetite == 'Conservative' else min(0.5, base_max * 1.1)
                     elif sector == 'Mid_Vol':
                         # Handle Mid_Vol sector with additional validation
-                        if count > 0:  # Only set constraints if sector has assets
+                        if sector in sector_counts and count > 0:  # Only set constraints if sector exists and has assets
                             sector_lower[sector] = 0.2 if risk_appetite != 'Aggressive' else 0.15
                             sector_upper[sector] = min(0.4, base_max * 1.1) if risk_appetite != 'Aggressive' else min(0.45, base_max * 1.2)
                         else:
