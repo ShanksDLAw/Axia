@@ -346,22 +346,27 @@ class PortfolioOptimizer:
             max_position = min(0.35, constraints['max_position'] * 2.0)  # More aggressive position limits
             min_position = 0.02  # Ensure meaningful positions
             
-            # Initialize efficient frontier with tighter bounds
+            # Initialize efficient frontier with validated bounds
             ef = EfficientFrontier(
                 filtered_returns,
                 risk_model,
-                weight_bounds=(min_position, max_position)
+                weight_bounds=(0.01, max_position)  # Ensure minimum position size
             )
             
-            # Add sector constraints
-            sector_constraints = defaultdict(list)
+            # Create sector mappings for constraints
+            sector_mappings = {}
             for asset in optimization_universe:
-                if asset in self.sectors:
-                    sector_constraints[self.sectors[asset]].append(asset)
+                if asset in self.normalized_sectors:
+                    sector = self.normalized_sectors[asset]
+                    sector_mappings[asset] = sector
             
-            # Set sector-level constraints
-            for sector, assets in sector_constraints.items():
-                ef.add_sector_constraints(assets, min_weight=0.1, max_weight=0.4)
+            # Set sector-level constraints with proper bounds
+            if sector_mappings:
+                sector_lower = {sector: 0.05 for sector in set(sector_mappings.values())}
+                sector_upper = {sector: constraints.get('max_sector', 0.4) for sector in set(sector_mappings.values())}
+                
+                # Add sector constraints with proper bounds
+                ef.add_sector_constraints(sector_mappings, sector_lower=sector_lower, sector_upper=sector_upper)
             
             # Add objective functions for aggressive optimization
             ef.add_objective(objective_functions.L2_reg, gamma=0.03)  # Reduced regularization
@@ -396,7 +401,7 @@ class PortfolioOptimizer:
             logging.error(f"Aggressive strategy optimization failed: {str(e)}")
             return self._defensive_strategy(constraints)
             
-    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None, risk_appetite: str = 'Moderate') -> tuple[dict[str, float], dict]:
+    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None) -> tuple[dict[str, float], dict]:
         """Balanced portfolio optimization with risk-adjusted momentum approach.
         
         Args:
@@ -407,8 +412,8 @@ class PortfolioOptimizer:
             tuple: (optimized weights dictionary, portfolio metrics dictionary)
         """
         try:
-            # Get risk appetite from parameter or constraints
-            risk_appetite = risk_appetite or constraints.get('risk_appetite', 'Moderate')
+            # Get risk appetite from constraints
+            risk_appetite = constraints.get('risk_appetite', 'Moderate')
             
             # Initialize momentum scores if not provided
             if momentum_score is None:
@@ -477,10 +482,9 @@ class PortfolioOptimizer:
             # Add sector constraints if sectors are defined
             if self.sectors:
                 sector_mapper = {asset: self.sectors.get(asset, 'Other') for asset in valid_assets}
-                sector_bounds = {}
-                for sector in set(sector_mapper.values()):
-                    sector_bounds[sector] = (0, constraints.get('max_sector', 0.35))
-                ef.add_sector_constraints(sector_mapper, sector_bounds)
+                sector_lower = {sector: 0.0 for sector in set(sector_mapper.values())}
+                sector_upper = {sector: constraints.get('max_sector', 0.35) for sector in set(sector_mapper.values())}
+                ef.add_sector_constraints(sector_mapper, sector_lower=sector_lower, sector_upper=sector_upper)
             
             # Optimize using max_sharpe with proper risk-free rate
             ef.max_sharpe(risk_free_rate=0.02)
@@ -666,17 +670,47 @@ class PortfolioOptimizer:
                 sector_counts = {sector: len(symbols) for sector, symbols in risk_based_sectors.items()}
                 logging.info(f"Created risk-based sectors: {sector_counts}")
                 
-                # Set conservative sector constraints
+                # Set conservative sector constraints with proper validation
                 constraints['max_sector'] = min(constraints.get('max_sector', 0.3), 0.4)
-                constraints['min_low_vol'] = 0.4  # Ensure at least 40% in low volatility assets
-                # Assign sectors based on volatility characteristics
-                for symbol in valid_symbols:
-                    self.normalized_sectors[symbol] = 'Low_Vol'  # Default to low volatility sector for conservative approach
+                
+                # Update sector mappings with validated risk-based sectors
+                for sector, symbols in risk_based_sectors.items():
+                    for symbol in symbols:
+                        if symbol in valid_symbols:  # Only update valid symbols
+                            self.normalized_sectors[symbol] = sector
             
-            # Calculate sector metrics with enhanced risk appetite consideration
+            # Calculate sector metrics with enhanced risk appetite consideration and validation
             sector_vols = {}
             sector_returns = {}
             risk_multiplier = 1.2 if risk_appetite == 'Aggressive' else (1.0 if risk_appetite == 'Moderate' else 0.8)
+            
+            # Validate sector assignments before proceeding
+            valid_sectors = set(self.normalized_sectors.values())
+            if not valid_sectors:
+                raise ValueError("No valid sector assignments found")
+            
+            # Ensure all required sectors exist
+            required_sectors = {'Low_Vol', 'Mid_Vol', 'High_Vol'}
+            if not required_sectors.issubset(valid_sectors):
+                missing_sectors = required_sectors - valid_sectors
+                logging.warning(f"Missing required sectors: {missing_sectors}. Creating default assignments.")
+                
+                # Create missing sectors with default assignments
+                for sector in missing_sectors:
+                    if sector == 'Low_Vol':
+                        threshold = np.percentile(volatility, 33)
+                        symbols = volatility[volatility <= threshold].index
+                    elif sector == 'Mid_Vol':
+                        lower = np.percentile(volatility, 33)
+                        upper = np.percentile(volatility, 67)
+                        symbols = volatility[(volatility > lower) & (volatility <= upper)].index
+                    else:  # High_Vol
+                        threshold = np.percentile(volatility, 67)
+                        symbols = volatility[volatility > threshold].index
+                    
+                    for symbol in symbols:
+                        if symbol in valid_symbols:
+                            self.normalized_sectors[symbol] = sector
             
             for sector, count in sector_counts.items():
                 try:
@@ -742,12 +776,43 @@ class PortfolioOptimizer:
                     vol_scale[sector] = 1.0
                     logging.warning(f"Invalid metrics for {sector}, using default scale")
             
-            # Calculate sector bounds with validation
+            # Calculate sector bounds with enhanced risk-based validation
             sector_upper = {}
             sector_lower = {}
+            total_allocation = 0.0
+            
             for sector in sector_counts:
                 count = sector_counts[sector]
                 if count > 0:
+                    # Dynamic sector bounds based on risk profile
+                    if sector == 'Low_Vol':
+                        sector_lower[sector] = 0.3 if risk_appetite == 'Conservative' else 0.2
+                        sector_upper[sector] = min(0.6, base_max * 1.2) if risk_appetite == 'Conservative' else min(0.5, base_max * 1.1)
+                    elif sector == 'Mid_Vol':
+                        sector_lower[sector] = 0.2 if risk_appetite != 'Aggressive' else 0.15
+                        sector_upper[sector] = min(0.4, base_max * 1.1) if risk_appetite != 'Aggressive' else min(0.45, base_max * 1.2)
+                    else:  # High_Vol
+                        sector_lower[sector] = 0.1
+                        sector_upper[sector] = min(0.3, base_max) if risk_appetite == 'Conservative' else min(0.4, base_max * 1.2)
+                    
+                    # Apply volatility scaling
+                    scale = vol_scale.get(sector, 1.0)
+                    sector_upper[sector] *= scale
+                    sector_lower[sector] *= scale
+                    
+                    # Ensure minimum allocation
+                    sector_lower[sector] = max(0.05, sector_lower[sector])
+                    
+                    # Track total allocation
+                    total_allocation += sector_lower[sector]
+                    
+            # Validate and adjust bounds if necessary
+            if total_allocation > 1.0:
+                # Scale down proportionally
+                scale_factor = 0.95 / total_allocation  # Leave some room for optimization
+                for sector in sector_lower:
+                    sector_lower[sector] *= scale_factor
+                    sector_upper[sector] *= scale_factor
                     # Upper bound with volatility adjustment
                     upper = base_max * vol_scale[sector] * (1 + np.log1p(count)/8)
                     sector_upper[sector] = min(0.4, max(0.1, upper))  # Ensure reasonable bounds
@@ -1721,17 +1786,47 @@ class PortfolioOptimizer:
                 sector_counts = {sector: len(symbols) for sector, symbols in risk_based_sectors.items()}
                 logging.info(f"Created risk-based sectors: {sector_counts}")
                 
-                # Set conservative sector constraints
+                # Set conservative sector constraints with proper validation
                 constraints['max_sector'] = min(constraints.get('max_sector', 0.3), 0.4)
-                constraints['min_low_vol'] = 0.4  # Ensure at least 40% in low volatility assets
-                # Assign sectors based on volatility characteristics
-                for symbol in valid_symbols:
-                    self.normalized_sectors[symbol] = 'Low_Vol'  # Default to low volatility sector for conservative approach
+                
+                # Update sector mappings with validated risk-based sectors
+                for sector, symbols in risk_based_sectors.items():
+                    for symbol in symbols:
+                        if symbol in valid_symbols:  # Only update valid symbols
+                            self.normalized_sectors[symbol] = sector
             
-            # Calculate sector metrics with enhanced risk appetite consideration
+            # Calculate sector metrics with enhanced risk appetite consideration and validation
             sector_vols = {}
             sector_returns = {}
             risk_multiplier = 1.2 if risk_appetite == 'Aggressive' else (1.0 if risk_appetite == 'Moderate' else 0.8)
+            
+            # Validate sector assignments before proceeding
+            valid_sectors = set(self.normalized_sectors.values())
+            if not valid_sectors:
+                raise ValueError("No valid sector assignments found")
+            
+            # Ensure all required sectors exist
+            required_sectors = {'Low_Vol', 'Mid_Vol', 'High_Vol'}
+            if not required_sectors.issubset(valid_sectors):
+                missing_sectors = required_sectors - valid_sectors
+                logging.warning(f"Missing required sectors: {missing_sectors}. Creating default assignments.")
+                
+                # Create missing sectors with default assignments
+                for sector in missing_sectors:
+                    if sector == 'Low_Vol':
+                        threshold = np.percentile(volatility, 33)
+                        symbols = volatility[volatility <= threshold].index
+                    elif sector == 'Mid_Vol':
+                        lower = np.percentile(volatility, 33)
+                        upper = np.percentile(volatility, 67)
+                        symbols = volatility[(volatility > lower) & (volatility <= upper)].index
+                    else:  # High_Vol
+                        threshold = np.percentile(volatility, 67)
+                        symbols = volatility[volatility > threshold].index
+                    
+                    for symbol in symbols:
+                        if symbol in valid_symbols:
+                            self.normalized_sectors[symbol] = sector
             
             for sector, count in sector_counts.items():
                 try:
@@ -1797,12 +1892,43 @@ class PortfolioOptimizer:
                     vol_scale[sector] = 1.0
                     logging.warning(f"Invalid metrics for {sector}, using default scale")
             
-            # Calculate sector bounds with validation
+            # Calculate sector bounds with enhanced risk-based validation
             sector_upper = {}
             sector_lower = {}
+            total_allocation = 0.0
+            
             for sector in sector_counts:
                 count = sector_counts[sector]
                 if count > 0:
+                    # Dynamic sector bounds based on risk profile
+                    if sector == 'Low_Vol':
+                        sector_lower[sector] = 0.3 if risk_appetite == 'Conservative' else 0.2
+                        sector_upper[sector] = min(0.6, base_max * 1.2) if risk_appetite == 'Conservative' else min(0.5, base_max * 1.1)
+                    elif sector == 'Mid_Vol':
+                        sector_lower[sector] = 0.2 if risk_appetite != 'Aggressive' else 0.15
+                        sector_upper[sector] = min(0.4, base_max * 1.1) if risk_appetite != 'Aggressive' else min(0.45, base_max * 1.2)
+                    else:  # High_Vol
+                        sector_lower[sector] = 0.1
+                        sector_upper[sector] = min(0.3, base_max) if risk_appetite == 'Conservative' else min(0.4, base_max * 1.2)
+                    
+                    # Apply volatility scaling
+                    scale = vol_scale.get(sector, 1.0)
+                    sector_upper[sector] *= scale
+                    sector_lower[sector] *= scale
+                    
+                    # Ensure minimum allocation
+                    sector_lower[sector] = max(0.05, sector_lower[sector])
+                    
+                    # Track total allocation
+                    total_allocation += sector_lower[sector]
+                    
+            # Validate and adjust bounds if necessary
+            if total_allocation > 1.0:
+                # Scale down proportionally
+                scale_factor = 0.95 / total_allocation  # Leave some room for optimization
+                for sector in sector_lower:
+                    sector_lower[sector] *= scale_factor
+                    sector_upper[sector] *= scale_factor
                     # Upper bound with volatility adjustment
                     upper = base_max * vol_scale[sector] * (1 + np.log1p(count)/8)
                     sector_upper[sector] = min(0.4, max(0.1, upper))  # Ensure reasonable bounds
