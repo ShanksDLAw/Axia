@@ -76,7 +76,7 @@ class PortfolioOptimizer:
                         constraints['max_position'] = min(constraints['max_position'] * 1.2, 0.1)  # Slightly increase limits
                     weights, metrics = self._aggressive_strategy(constraints, momentum_score)
                 else:
-                    weights, metrics = self._balanced_strategy(constraints, momentum_score)
+                    weights, metrics = self._balanced_strategy(constraints)
             except Exception as strategy_error:
                 logging.error(f"Strategy optimization failed: {str(strategy_error)}. Falling back to defensive strategy.")
                 try:
@@ -618,8 +618,9 @@ class PortfolioOptimizer:
                 # Set conservative sector constraints
                 constraints['max_sector'] = min(constraints.get('max_sector', 0.3), 0.4)
                 constraints['min_low_vol'] = 0.4  # Ensure at least 40% in low volatility assets
+                # Assign sectors based on volatility characteristics
                 for symbol in valid_symbols:
-                    self.normalized_sectors[symbol] = default_sector
+                    self.normalized_sectors[symbol] = 'Low_Vol'  # Default to low volatility sector for conservative approach
             
             # Calculate sector metrics with enhanced risk appetite consideration
             sector_vols = {}
@@ -1672,8 +1673,9 @@ class PortfolioOptimizer:
                 # Set conservative sector constraints
                 constraints['max_sector'] = min(constraints.get('max_sector', 0.3), 0.4)
                 constraints['min_low_vol'] = 0.4  # Ensure at least 40% in low volatility assets
+                # Assign sectors based on volatility characteristics
                 for symbol in valid_symbols:
-                    self.normalized_sectors[symbol] = default_sector
+                    self.normalized_sectors[symbol] = 'Low_Vol'  # Default to low volatility sector for conservative approach
             
             # Calculate sector metrics with enhanced risk appetite consideration
             sector_vols = {}
