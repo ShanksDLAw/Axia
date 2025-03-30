@@ -69,7 +69,10 @@ class PortfolioOptimizer:
             try:
                 if regime == 'Bearish':
                     weights, metrics = self._defensive_strategy(constraints)
-                elif regime == 'Bullish' and risk_appetite in ['Moderate', 'Aggressive']:
+                elif regime == 'Bullish':
+                    # Always use aggressive strategy for bullish regime with adjusted risk parameters
+                    if risk_appetite == 'Conservative':
+                        constraints['max_position'] = min(constraints['max_position'] * 1.2, 0.1)  # Slightly increase limits
                     weights, metrics = self._aggressive_strategy(constraints, momentum_score)
                 else:
                     weights, metrics = self._balanced_strategy(constraints, momentum_score)
@@ -246,25 +249,36 @@ class PortfolioOptimizer:
             optimization_universe = list(high_momentum_assets)
             filtered_returns = expected_returns[optimization_universe] * 1.2  # Amplify return expectations
             
-            # Calculate risk model with stronger emphasis on recent market behavior and enhanced stability
+            # Calculate risk model with enhanced stability for bullish market conditions
             try:
-                price_data_recent = self.price_data[optimization_universe].tail(63)  # Last 3 months for higher responsiveness
-                risk_model = risk_models.CovarianceShrinkage(
+                # Use exponential weighted returns for recent market sensitivity
+                returns = self.returns_df[optimization_universe].ewm(halflife=42).mean()
+                # Calculate covariance with shorter lookback for bullish regime
+                price_data_recent = self.price_data[optimization_universe].tail(126)
+                
+                # Apply double shrinkage for enhanced stability
+                shrinkage = risk_models.CovarianceShrinkage(
                     price_data_recent,
                     frequency=252
-                ).ledoit_wolf()
+                )
+                risk_model = shrinkage.ledoit_wolf()
                 
-                # Check if the matrix is positive semidefinite
-                min_eigenval = np.min(np.linalg.eigvals(risk_model))
+                # Ensure positive semidefiniteness with advanced regularization
+                eigenvals, eigenvecs = np.linalg.eigh(risk_model)
+                min_eigenval = eigenvals.min()
                 if min_eigenval < 1e-8:
-                    # Add a small positive value to the diagonal
-                    logging.info("Fixing non-positive semidefinite covariance matrix in aggressive strategy")
-                    risk_model += np.eye(len(risk_model)) * (abs(min_eigenval) + 1e-8)
+                    # Apply targeted regularization
+                    delta = abs(min_eigenval) + 1e-8
+                    n_assets = len(risk_model)
+                    target_matrix = np.diag(np.diag(risk_model))
+                    risk_model = (1 - delta) * risk_model + delta * target_matrix
+                    logging.info("Applied targeted regularization for enhanced stability")
             except Exception as e:
-                logging.warning(f"Error in aggressive strategy covariance calculation: {str(e)}. Using sample covariance.")
-                # Fallback to simpler covariance with stability enhancement
-                risk_model = risk_models.sample_cov(self.price_data[optimization_universe], frequency=252)
-                risk_model += np.eye(len(risk_model)) * 1e-6
+                logging.warning(f"Advanced risk model failed: {str(e)}. Using robust fallback.")
+                # Robust fallback with exponential weighting
+                returns = self.returns_df[optimization_universe].ewm(span=63).cov()
+                risk_model = 0.8 * returns.mean() + 0.2 * np.diag(np.diag(returns.mean()))
+                risk_model = np.array(risk_model)
             
             # Set up efficient frontier with more aggressive parameters
             max_position = min(0.25, constraints['max_position'] * 1.5)  # Allow higher position limits
@@ -300,9 +314,13 @@ class PortfolioOptimizer:
             logging.error(f"Aggressive strategy optimization failed: {str(e)}")
             return self._defensive_strategy(constraints)
             
-    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None, regime: str = 'Neutral') -> tuple[dict[str, float], dict]:
+    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None) -> tuple[dict[str, float], dict]:
         """Balanced portfolio optimization with risk-adjusted momentum approach."""
         try:
+            # Handle case when momentum_score is None
+            if momentum_score is None:
+                momentum_score = pd.Series(1.0, index=self.price_data.columns)
+            
             # Ensure alignment between price data and momentum score
             common_assets = self.price_data.columns.intersection(momentum_score.index)
             if len(common_assets) == 0:
@@ -310,7 +328,11 @@ class PortfolioOptimizer:
             
             # Calculate expected returns with balanced momentum influence
             valid_momentum = momentum_score[common_assets]
-            expected_returns = self._calculate_expected_returns(valid_momentum * 0.7)  # Reduced momentum influence
+            expected_returns = self._calculate_expected_returns(
+                momentum_score=valid_momentum * 0.7,  # Reduced momentum influence
+                regime='Neutral',
+                risk_appetite='Moderate'
+            )
             
             # Filter assets with positive momentum
             valid_assets = valid_momentum[valid_momentum > 0].index
@@ -322,8 +344,7 @@ class PortfolioOptimizer:
             # Calculate risk model with enhanced stability and regularization
             try:
                 # Use exponential weighted covariance for recent market sensitivity
-                returns = self.returns_df[valid_assets].ewm(halflife=63).cov()
-                latest_cov = returns.iloc[-252:]
+                returns = self.returns_df[valid_assets].ewm(halflife=63).mean()
                 
                 # Apply shrinkage to stabilize the covariance matrix
                 shrinkage = risk_models.CovarianceShrinkage(
@@ -333,7 +354,8 @@ class PortfolioOptimizer:
                 risk_model = shrinkage.ledoit_wolf()
                 
                 # Ensure positive semidefiniteness
-                min_eigenval = np.min(np.linalg.eigvals(risk_model))
+                eigenvals = np.linalg.eigvals(risk_model)
+                min_eigenval = np.min(np.real(eigenvals))
                 if min_eigenval < 1e-8:
                     # Add regularization term
                     delta = abs(min_eigenval) + 1e-8
@@ -356,7 +378,19 @@ class PortfolioOptimizer:
             # Add balanced objective functions
             ef.add_objective(objective_functions.L2_reg, gamma=0.5)  # Moderate regularization
             
-            # Optimize using max_sharpe directly
+            # Add sector constraints if sectors are defined
+            if self.sectors:
+                sector_mapper = {asset: self.sectors.get(asset, 'Other') for asset in valid_assets}
+                sector_bounds = {}
+                for sector in set(sector_mapper.values()):
+                    sector_bounds[sector] = (0, constraints.get('max_sector', 0.35))
+                ef.add_sector_constraints(sector_mapper, sector_bounds)
+            
+            # Optimize using max_sharpe with proper risk-free rate
+            ef.max_sharpe(risk_free_rate=0.02)
+            weights = ef.clean_weights(cutoff=0.01)
+            
+            # Calculate portfolio metricsharpe directly
             cleaned_weights = ef.max_sharpe(risk_free_rate=0.015)
             cleaned_weights = ef.clean_weights(cutoff=0.01)
             
