@@ -45,6 +45,14 @@ class PortfolioOptimizer:
             tuple: (optimized weights dictionary, portfolio metrics dictionary)
         """
         try:
+            # Set dynamic constraints based on risk appetite and market regime
+            constraints = {
+                'risk_appetite': risk_appetite,
+                'max_sector': 0.45 if risk_appetite == 'Aggressive' else (0.35 if risk_appetite == 'Moderate' else 0.25),
+                'min_bonds': 0.15 if risk_appetite == 'Conservative' else (0.1 if risk_appetite == 'Moderate' else 0.05),
+                'max_position': 0.15 if risk_appetite == 'Aggressive' else (0.1 if risk_appetite == 'Moderate' else 0.05)
+            }
+            
             # Calculate momentum and volatility signals
             returns_12m = self.returns_df.rolling(window=252).mean()
             volatility_3m = self.returns_df.rolling(window=63).std() * np.sqrt(252)
@@ -57,13 +65,6 @@ class PortfolioOptimizer:
             except Exception as momentum_error:
                 logging.warning(f"Error calculating momentum score: {str(momentum_error)}. Using zeros.")
                 momentum_score = pd.Series(0, index=self.returns_df.columns)
-            
-            # Set dynamic constraints based on risk appetite and market regime
-            constraints = {
-                'max_sector': 0.45 if risk_appetite == 'Aggressive' else (0.35 if risk_appetite == 'Moderate' else 0.25),
-                'min_bonds': 0.15 if risk_appetite == 'Conservative' else (0.1 if risk_appetite == 'Moderate' else 0.05),
-                'max_position': 0.15 if risk_appetite == 'Aggressive' else (0.1 if risk_appetite == 'Moderate' else 0.05)
-            }
             
             # Get optimized weights based on regime and risk appetite
             try:
@@ -153,7 +154,7 @@ class PortfolioOptimizer:
 
 
     def _calculate_portfolio_variance(self, weights: dict) -> float:
-        """Calculate portfolio variance using the covariance matrix with robust error handling."""
+        """Calculate portfolio variance using the covariance matrix with enhanced regularization for low-risk scenarios."""
         try:
             # Handle empty weights or cash-only portfolio
             if not weights or all(k == 'CASH' for k in weights.keys()):
@@ -166,39 +167,51 @@ class PortfolioOptimizer:
             if np.sum(weight_array) == 0:
                 return 0.0
                 
-            # Calculate covariance matrix with enhanced regularization
+            # Enhanced covariance calculation with conservative regularization
             try:
-                # Use shorter lookback period for more recent market sensitivity
-                recent_data = self.price_data.tail(252)  # Use 1 year of data
+                # Use longer lookback period for more stable estimation
+                recent_data = self.price_data.tail(504)  # Use 2 years of data for stability
                 
-                # Apply double shrinkage for enhanced stability
+                # Multi-step regularization for enhanced stability
+                # Step 1: Initial shrinkage estimation
                 shrinkage = risk_models.CovarianceShrinkage(recent_data)
                 base_cov = shrinkage.ledoit_wolf()
                 
-                # Additional regularization for numerical stability
+                # Step 2: Spectral decomposition for targeted regularization
                 eigenvals, eigenvecs = np.linalg.eigh(base_cov)
                 min_eigenval = eigenvals.min()
                 
-                if min_eigenval < 1e-8:
-                    # Apply targeted regularization
-                    delta = abs(min_eigenval) + 1e-8
-                    n_assets = len(base_cov)
-                    target_matrix = np.diag(np.diag(base_cov))
+                # Step 3: Enhanced regularization for low-risk scenarios
+                if min_eigenval < 1e-6:
+                    # Calculate average volatility for scaling
+                    avg_vol = np.sqrt(np.mean(np.diag(base_cov)))
+                    # Stronger regularization for numerical stability
+                    delta = max(abs(min_eigenval) + 1e-6, 0.1)  # Minimum 10% shrinkage
+                    # Create target matrix using average volatility
+                    target_matrix = np.eye(len(base_cov)) * (avg_vol ** 2)
+                    # Apply conservative shrinkage
                     cov_matrix = (1 - delta) * base_cov + delta * target_matrix
+                    
+                    # Verify positive definiteness
+                    min_eig = np.min(np.linalg.eigvals(cov_matrix))
+                    if min_eig < 1e-10:
+                        # If still not positive definite, use more conservative approach
+                        cov_matrix = target_matrix
                 else:
                     cov_matrix = base_cov
                 
-                # Calculate portfolio variance
+                # Calculate portfolio variance with validation
                 portfolio_variance = weight_array.T @ cov_matrix @ weight_array
                 
-                # Validate result with enhanced checks
+                # Enhanced validation for low-risk portfolios
                 if np.isnan(portfolio_variance) or portfolio_variance < 0:
-                    logging.warning(f"Invalid portfolio variance after regularization: {portfolio_variance}. Using robust fallback.")
-                    # Use robust estimation based on individual variances
-                    diag_vars = np.diag(cov_matrix)
-                    portfolio_variance = np.sum((weight_array ** 2) * diag_vars)
+                    logging.warning("Invalid variance detected. Using conservative estimation.")
+                    # Use individual asset variances with minimum volatility floor
+                    min_vol_floor = 0.05  # 5% minimum annualized volatility
+                    asset_vars = np.maximum(np.diag(cov_matrix), min_vol_floor ** 2)
+                    portfolio_variance = np.sum((weight_array ** 2) * asset_vars)
                 
-                return max(portfolio_variance, 1e-8)  # Ensure non-negative variance
+                return max(portfolio_variance, 0.01 ** 2)  # Minimum 1% annualized volatility
                 
             except Exception as cov_error:
                 logging.error(f"Enhanced covariance calculation failed: {str(cov_error)}")
@@ -346,7 +359,10 @@ class PortfolioOptimizer:
             logging.error(f"Aggressive strategy optimization failed: {str(e)}")
             return self._defensive_strategy(constraints)
             
-    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None, risk_appetite: str = 'Moderate') -> tuple[dict[str, float], dict]:
+    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None) -> tuple[dict[str, float], dict]:
+        """Balanced portfolio optimization with risk-adjusted momentum approach."""
+        # Get risk appetite from constraints or default to Moderate
+        risk_appetite = constraints.get('risk_appetite', 'Moderate')
         """Balanced portfolio optimization with risk-adjusted momentum approach."""
         try:
             # Handle case when momentum_score is None
@@ -579,13 +595,29 @@ class PortfolioOptimizer:
             # Log sector distribution
             logging.info(f"Sector distribution: {sector_counts}")
             
-            # Handle case where no sectors are found
+            # Enhanced sector handling for conservative allocation
             if not sector_counts:
-                logging.warning("No valid sectors found. Creating default sector allocation.")
-                # Create a default sector allocation
-                default_sector = "Uncategorized"
-                sector_counts = {default_sector: len(valid_symbols)}
-                # Assign all symbols to default sector
+                logging.warning("No valid sectors found. Creating conservative sector allocation.")
+                # Create default sectors based on risk characteristics
+                risk_based_sectors = {
+                    'Low_Vol': volatility[volatility <= np.percentile(volatility, 33)].index,
+                    'Mid_Vol': volatility[(volatility > np.percentile(volatility, 33)) & 
+                                        (volatility <= np.percentile(volatility, 67))].index,
+                    'High_Vol': volatility[volatility > np.percentile(volatility, 67)].index
+                }
+                
+                # Update sector mappings with risk-based sectors
+                for sector, symbols in risk_based_sectors.items():
+                    for symbol in symbols:
+                        self.normalized_sectors[symbol] = sector
+                
+                # Update sector counts
+                sector_counts = {sector: len(symbols) for sector, symbols in risk_based_sectors.items()}
+                logging.info(f"Created risk-based sectors: {sector_counts}")
+                
+                # Set conservative sector constraints
+                constraints['max_sector'] = min(constraints.get('max_sector', 0.3), 0.4)
+                constraints['min_low_vol'] = 0.4  # Ensure at least 40% in low volatility assets
                 for symbol in valid_symbols:
                     self.normalized_sectors[symbol] = default_sector
             
@@ -1617,13 +1649,29 @@ class PortfolioOptimizer:
             # Log sector distribution
             logging.info(f"Sector distribution: {sector_counts}")
             
-            # Handle case where no sectors are found
+            # Enhanced sector handling for conservative allocation
             if not sector_counts:
-                logging.warning("No valid sectors found. Creating default sector allocation.")
-                # Create a default sector allocation
-                default_sector = "Uncategorized"
-                sector_counts = {default_sector: len(valid_symbols)}
-                # Assign all symbols to default sector
+                logging.warning("No valid sectors found. Creating conservative sector allocation.")
+                # Create default sectors based on risk characteristics
+                risk_based_sectors = {
+                    'Low_Vol': volatility[volatility <= np.percentile(volatility, 33)].index,
+                    'Mid_Vol': volatility[(volatility > np.percentile(volatility, 33)) & 
+                                        (volatility <= np.percentile(volatility, 67))].index,
+                    'High_Vol': volatility[volatility > np.percentile(volatility, 67)].index
+                }
+                
+                # Update sector mappings with risk-based sectors
+                for sector, symbols in risk_based_sectors.items():
+                    for symbol in symbols:
+                        self.normalized_sectors[symbol] = sector
+                
+                # Update sector counts
+                sector_counts = {sector: len(symbols) for sector, symbols in risk_based_sectors.items()}
+                logging.info(f"Created risk-based sectors: {sector_counts}")
+                
+                # Set conservative sector constraints
+                constraints['max_sector'] = min(constraints.get('max_sector', 0.3), 0.4)
+                constraints['min_low_vol'] = 0.4  # Ensure at least 40% in low volatility assets
                 for symbol in valid_symbols:
                     self.normalized_sectors[symbol] = default_sector
             
