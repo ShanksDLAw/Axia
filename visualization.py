@@ -4,12 +4,21 @@ import pandas as pd
 from plotly.subplots import make_subplots
 
 def create_portfolio_dashboard(weights_data, sector_weights, risk_metrics):
-    # Create figure with optimized layout
+    # Validate and clean input data
+    if not isinstance(sector_weights, dict) or not sector_weights:
+        sector_weights = {'Uncategorized': 1.0}
+    
+    # Normalize sector weights if they don't sum to 1
+    total_sector_weight = sum(sector_weights.values())
+    if not np.isclose(total_sector_weight, 1.0, rtol=1e-3):
+        sector_weights = {k: v/total_sector_weight for k, v in sector_weights.items()}
+    
+    # Create figure with optimized layout for medium risk profile
     fig = make_subplots(
         rows=2, cols=2,
         specs=[[{"type": "pie", "rowspan": 1}, {"type": "bar"}],
                [{"type": "treemap"}, {"type": "indicator"}]],
-        subplot_titles=("Sector Allocation", "Top 10 Holdings", "Asset Allocation Treemap", "Risk Metrics"),
+        subplot_titles=("Sector Allocation", "Top 10 Holdings", "Asset Allocation Treemap", "Risk Profile Metrics"),
         vertical_spacing=0.15,
         horizontal_spacing=0.1
     )

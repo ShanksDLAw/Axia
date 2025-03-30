@@ -166,20 +166,46 @@ class PortfolioOptimizer:
             if np.sum(weight_array) == 0:
                 return 0.0
                 
-            # Calculate covariance matrix with error handling
+            # Calculate covariance matrix with enhanced regularization
             try:
-                cov_matrix = risk_models.sample_cov(self.price_data)
+                # Use shorter lookback period for more recent market sensitivity
+                recent_data = self.price_data.tail(252)  # Use 1 year of data
+                
+                # Apply double shrinkage for enhanced stability
+                shrinkage = risk_models.CovarianceShrinkage(recent_data)
+                base_cov = shrinkage.ledoit_wolf()
+                
+                # Additional regularization for numerical stability
+                eigenvals, eigenvecs = np.linalg.eigh(base_cov)
+                min_eigenval = eigenvals.min()
+                
+                if min_eigenval < 1e-8:
+                    # Apply targeted regularization
+                    delta = abs(min_eigenval) + 1e-8
+                    n_assets = len(base_cov)
+                    target_matrix = np.diag(np.diag(base_cov))
+                    cov_matrix = (1 - delta) * base_cov + delta * target_matrix
+                else:
+                    cov_matrix = base_cov
+                
+                # Calculate portfolio variance
                 portfolio_variance = weight_array.T @ cov_matrix @ weight_array
                 
-                # Validate result
+                # Validate result with enhanced checks
                 if np.isnan(portfolio_variance) or portfolio_variance < 0:
-                    logging.warning(f"Invalid portfolio variance: {portfolio_variance}. Using default value.")
-                    return 0.15**2  # Default annualized variance
-                    
-                return portfolio_variance
+                    logging.warning(f"Invalid portfolio variance after regularization: {portfolio_variance}. Using robust fallback.")
+                    # Use robust estimation based on individual variances
+                    diag_vars = np.diag(cov_matrix)
+                    portfolio_variance = np.sum((weight_array ** 2) * diag_vars)
+                
+                return max(portfolio_variance, 1e-8)  # Ensure non-negative variance
+                
             except Exception as cov_error:
-                logging.error(f"Error calculating covariance matrix: {str(cov_error)}")
-                return 0.15**2  # Default annualized variance
+                logging.error(f"Enhanced covariance calculation failed: {str(cov_error)}")
+                # Fallback to simple diagonal covariance
+                vol = self.returns_df.std() * np.sqrt(252)
+                diag_cov = np.diag(vol * vol)
+                return max(weight_array.T @ diag_cov @ weight_array, 1e-8)
                 
         except Exception as e:
             logging.error(f"Error in portfolio variance calculation: {str(e)}")
@@ -288,16 +314,22 @@ class PortfolioOptimizer:
                 weight_bounds=(0, max_position)
             )
             
-            # Add objective functions with more aggressive weights
+            # Add objective function for L2 regularization
             ef.add_objective(objective_functions.L2_reg, gamma=0.05)  # Minimal regularization
-            ef.add_objective(objective_functions.MaxSharpe(risk_free_rate=0.01))  # Lower risk-free rate for higher allocation to risky assets
             
-            # Optimize and clean weights
-            # The EfficientFrontier class doesn't have an 'optimize' method directly
-            # Instead, we need to call a specific optimization method like max_sharpe()
-            ef.max_sharpe(risk_free_rate=0.01)
-            weights = ef.weights
-            cleaned_weights = ef.clean_weights(cutoff=0.02)
+            # Optimize for maximum Sharpe ratio
+            try:
+                weights = ef.max_sharpe(risk_free_rate=0.01)
+                cleaned_weights = ef.clean_weights(cutoff=0.02)
+            except Exception as e:
+                logging.warning(f"Max Sharpe optimization failed: {str(e)}. Trying alternative approach.")
+                # Try alternative optimization approach
+                try:
+                    weights = ef.max_quadratic_utility(risk_aversion=1.0)
+                    cleaned_weights = ef.clean_weights(cutoff=0.02)
+                except Exception as alt_e:
+                    logging.error(f"Alternative optimization failed: {str(alt_e)}")
+                    raise
             
             # Calculate portfolio metrics
             metrics = {
@@ -314,7 +346,7 @@ class PortfolioOptimizer:
             logging.error(f"Aggressive strategy optimization failed: {str(e)}")
             return self._defensive_strategy(constraints)
             
-    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None) -> tuple[dict[str, float], dict]:
+    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None, risk_appetite: str = 'Moderate') -> tuple[dict[str, float], dict]:
         """Balanced portfolio optimization with risk-adjusted momentum approach."""
         try:
             # Handle case when momentum_score is None
@@ -557,9 +589,11 @@ class PortfolioOptimizer:
                 for symbol in valid_symbols:
                     self.normalized_sectors[symbol] = default_sector
             
-            # Calculate sector metrics with robust error handling
+            # Calculate sector metrics with enhanced risk appetite consideration
             sector_vols = {}
             sector_returns = {}
+            risk_multiplier = 1.2 if risk_appetite == 'Aggressive' else (1.0 if risk_appetite == 'Moderate' else 0.8)
+            
             for sector, count in sector_counts.items():
                 try:
                     # Get symbols in this sector
@@ -567,17 +601,25 @@ class PortfolioOptimizer:
                     if not sector_symbols:
                         continue
                         
-                    # Calculate sector volatility
+                    # Calculate sector volatility with risk adjustment
                     sector_returns_data = filtered_returns[sector_symbols]
-                    sector_vols[sector] = np.std(sector_returns_data) if len(sector_returns_data) > 0 else np.median(filtered_returns.std())
+                    if len(sector_returns_data) > 0:
+                        base_vol = np.std(sector_returns_data)
+                        sector_vols[sector] = base_vol * risk_multiplier
+                    else:
+                        sector_vols[sector] = np.median(filtered_returns.std()) * risk_multiplier
                     
-                    # Calculate sector returns
-                    sector_returns[sector] = np.mean(sector_returns_data) if len(sector_returns_data) > 0 else np.median(filtered_returns)
+                    # Calculate sector returns with risk-adjusted expectations
+                    if len(sector_returns_data) > 0:
+                        base_return = np.mean(sector_returns_data)
+                        sector_returns[sector] = base_return * risk_multiplier
+                    else:
+                        sector_returns[sector] = np.median(filtered_returns) * risk_multiplier
                 except Exception as e:
                     logging.warning(f"Error calculating metrics for sector {sector}: {str(e)}")
-                    # Use median values as fallback
-                    sector_vols[sector] = np.median([v for v in sector_vols.values() if v > 0] or [0.1])
-                    sector_returns[sector] = np.median([r for r in sector_returns.values() if r != 0] or [0.05])
+                    # Use risk-adjusted median values as fallback
+                    sector_vols[sector] = np.median([v for v in sector_vols.values() if v > 0] or [0.1]) * risk_multiplier
+                    sector_returns[sector] = np.median([r for r in sector_returns.values() if r != 0] or [0.05]) * risk_multiplier
 
             # Calculate adaptive sector limits with enhanced validation and volatility scaling
             num_sectors = len(sector_counts)
@@ -1585,9 +1627,11 @@ class PortfolioOptimizer:
                 for symbol in valid_symbols:
                     self.normalized_sectors[symbol] = default_sector
             
-            # Calculate sector metrics with robust error handling
+            # Calculate sector metrics with enhanced risk appetite consideration
             sector_vols = {}
             sector_returns = {}
+            risk_multiplier = 1.2 if risk_appetite == 'Aggressive' else (1.0 if risk_appetite == 'Moderate' else 0.8)
+            
             for sector, count in sector_counts.items():
                 try:
                     # Get symbols in this sector
@@ -1595,17 +1639,25 @@ class PortfolioOptimizer:
                     if not sector_symbols:
                         continue
                         
-                    # Calculate sector volatility
+                    # Calculate sector volatility with risk adjustment
                     sector_returns_data = filtered_returns[sector_symbols]
-                    sector_vols[sector] = np.std(sector_returns_data) if len(sector_returns_data) > 0 else np.median(filtered_returns.std())
+                    if len(sector_returns_data) > 0:
+                        base_vol = np.std(sector_returns_data)
+                        sector_vols[sector] = base_vol * risk_multiplier
+                    else:
+                        sector_vols[sector] = np.median(filtered_returns.std()) * risk_multiplier
                     
-                    # Calculate sector returns
-                    sector_returns[sector] = np.mean(sector_returns_data) if len(sector_returns_data) > 0 else np.median(filtered_returns)
+                    # Calculate sector returns with risk-adjusted expectations
+                    if len(sector_returns_data) > 0:
+                        base_return = np.mean(sector_returns_data)
+                        sector_returns[sector] = base_return * risk_multiplier
+                    else:
+                        sector_returns[sector] = np.median(filtered_returns) * risk_multiplier
                 except Exception as e:
                     logging.warning(f"Error calculating metrics for sector {sector}: {str(e)}")
-                    # Use median values as fallback
-                    sector_vols[sector] = np.median([v for v in sector_vols.values() if v > 0] or [0.1])
-                    sector_returns[sector] = np.median([r for r in sector_returns.values() if r != 0] or [0.05])
+                    # Use risk-adjusted median values as fallback
+                    sector_vols[sector] = np.median([v for v in sector_vols.values() if v > 0] or [0.1]) * risk_multiplier
+                    sector_returns[sector] = np.median([r for r in sector_returns.values() if r != 0] or [0.05]) * risk_multiplier
 
             # Calculate adaptive sector limits with enhanced validation and volatility scaling
             num_sectors = len(sector_counts)
