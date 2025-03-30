@@ -42,6 +42,28 @@ class Backtester:
             
             # Create weights series and align with returns data
             weights_series = pd.Series(valid_weights)
+            
+            # Handle special case for 'CASH' which doesn't need to be in returns data
+            cash_weight = 0.0
+            if 'CASH' in weights_series.index:
+                cash_weight = weights_series['CASH']
+                weights_series = weights_series.drop('CASH')
+                
+            if weights_series.empty and cash_weight > 0:
+                # Portfolio is 100% cash, return zero-risk metrics
+                return {
+                    'Total Return': (1 + risk_free_rate) ** (len(self.returns) / 252) - 1,
+                    'Annualized Return': risk_free_rate,
+                    'Annualized Volatility': 0.0,
+                    'Sharpe Ratio': 0.0,
+                    'Sortino Ratio': 0.0,
+                    'Max Drawdown': 0.0,
+                    'Sector Allocation': {'Cash': 1.0},
+                    'Number of Assets': 1,
+                    'Cumulative Turnover': 0.0,
+                    'Average Daily Turnover': 0.0
+                }
+            
             common_assets = self.returns.columns.intersection(weights_series.index)
             
             # Enhanced validation for common assets with detailed error message
@@ -61,11 +83,33 @@ class Backtester:
             aligned_returns = self.returns[common_assets]
             aligned_weights = weights_series[common_assets]
             
+            # Add back cash weight if present
+            if cash_weight > 0:
+                # Adjust other weights proportionally
+                non_cash_sum = aligned_weights.sum()
+                if non_cash_sum > 0:
+                    aligned_weights = aligned_weights * (1 - cash_weight) / non_cash_sum
+            
             # Normalize weights with validation
-            if not np.isclose(aligned_weights.sum(), 1.0, rtol=1e-3):
+            if not np.isclose(aligned_weights.sum(), 1.0 - cash_weight, rtol=1e-3):
                 if aligned_weights.sum() <= 0:
-                    raise ValueError("Sum of weights must be positive")
-                aligned_weights = aligned_weights / aligned_weights.sum()
+                    if cash_weight > 0:
+                        # All in cash
+                        return {
+                            'Total Return': (1 + risk_free_rate) ** (len(self.returns) / 252) - 1,
+                            'Annualized Return': risk_free_rate,
+                            'Annualized Volatility': 0.0,
+                            'Sharpe Ratio': 0.0,
+                            'Sortino Ratio': 0.0,
+                            'Max Drawdown': 0.0,
+                            'Sector Allocation': {'Cash': 1.0},
+                            'Number of Assets': 1,
+                            'Cumulative Turnover': 0.0,
+                            'Average Daily Turnover': 0.0
+                        }
+                    else:
+                        raise ValueError("Sum of weights must be positive")
+                aligned_weights = aligned_weights / aligned_weights.sum() * (1 - cash_weight)
                 logging.info(f"Weights normalized. Original sum: {weights_series[common_assets].sum():.4f}")
             
             # Validate returns data
@@ -84,42 +128,50 @@ class Backtester:
             cumulative_turnover = 0.0
             last_rebalance_index = 0
             
+            # Add cash component to portfolio weights if needed
+            if cash_weight > 0:
+                # For calculation purposes, we track cash separately
+                cash_return = risk_free_rate / 252  # Daily risk-free rate
+            
             for i in range(len(portfolio_returns)):
                 try:
                     # Get current day's returns and handle missing values
                     returns_vector = aligned_returns.iloc[i].fillna(0)
                     
-                    # Calculate portfolio return before costs
+                    # Calculate portfolio return before costs (including cash component)
                     daily_return = returns_vector.dot(portfolio_weights)
+                    if cash_weight > 0:
+                        daily_return = daily_return * (1 - cash_weight) + cash_weight * cash_return
                     
                     # Update weights due to price changes (drift)
-                    drifted_weights = portfolio_weights * (1 + returns_vector)
-                    drifted_sum = drifted_weights.sum()
-                    
-                    # Validate drifted weights
-                    if drifted_sum > 0 and not np.isnan(drifted_sum):
-                        drifted_weights = drifted_weights / drifted_sum
-                    else:
-                        drifted_weights = portfolio_weights.copy()
-                        logging.warning(f"Weight drift calculation failed at index {i}. Maintaining previous weights.")
-                    
-                    # Check for rebalancing (monthly)
-                    days_since_last_rebalance = i - last_rebalance_index
-                    is_rebalancing_day = days_since_last_rebalance >= 21
-                    
-                    # Calculate transaction costs and update weights
-                    rebalancing_cost = 0.0
-                    if is_rebalancing_day:
-                        # Calculate turnover and costs
-                        turnover = (aligned_weights - drifted_weights).abs().sum()
-                        rebalancing_cost = transaction_cost * turnover
-                        cumulative_turnover += turnover
+                    if portfolio_weights.sum() > 0:  # Only update if we have non-cash investments
+                        drifted_weights = portfolio_weights * (1 + returns_vector)
+                        drifted_sum = drifted_weights.sum()
                         
-                        # Update weights and tracking
-                        portfolio_weights = aligned_weights.copy()
-                        last_rebalance_index = i
-                    else:
-                        portfolio_weights = drifted_weights
+                        # Validate drifted weights
+                        if drifted_sum > 0 and not np.isnan(drifted_sum):
+                            drifted_weights = drifted_weights / drifted_sum * (1 - cash_weight)
+                        else:
+                            drifted_weights = portfolio_weights.copy()
+                            logging.warning(f"Weight drift calculation failed at index {i}. Maintaining previous weights.")
+                        
+                        # Check for rebalancing (monthly)
+                        days_since_last_rebalance = i - last_rebalance_index
+                        is_rebalancing_day = days_since_last_rebalance >= 21
+                        
+                        # Calculate transaction costs and update weights
+                        rebalancing_cost = 0.0
+                        if is_rebalancing_day:
+                            # Calculate turnover and costs
+                            turnover = (aligned_weights - drifted_weights).abs().sum()
+                            rebalancing_cost = transaction_cost * turnover
+                            cumulative_turnover += turnover
+                            
+                            # Update weights and tracking
+                            portfolio_weights = aligned_weights.copy()
+                            last_rebalance_index = i
+                        else:
+                            portfolio_weights = drifted_weights
                     
                     # Calculate portfolio value and returns
                     if i == 0:
@@ -129,11 +181,17 @@ class Backtester:
                         # Calculate daily return with transaction costs
                         net_return = daily_return - rebalancing_cost
                         portfolio_value.iloc[i] = portfolio_value.iloc[i-1] * (1 + net_return)
-                        portfolio_returns.iloc[i] = net_return  # Store actual daily returns
+                        portfolio_returns.iloc[i] = net_return  # Store actual daily returns with costs
                     
                 except Exception as inner_e:
                     logging.error(f"Error at iteration {i}: {str(inner_e)}")
-                    portfolio_returns.iloc[i] = portfolio_returns.iloc[i-1] if i > 0 else 0
+                    # Use previous return or zero, but don't crash the backtest
+                    if i > 0:
+                        portfolio_returns.iloc[i] = portfolio_returns.iloc[i-1]
+                        portfolio_value.iloc[i] = portfolio_value.iloc[i-1]
+                    else:
+                        portfolio_returns.iloc[i] = 0
+                        portfolio_value.iloc[i] = 1.0
             
             # Calculate comprehensive metrics
             metrics = self._calculate_metrics(portfolio_returns, risk_free_rate)
@@ -193,26 +251,65 @@ class Backtester:
     def _calculate_metrics(self, portfolio_returns: pd.Series, risk_free_rate: float = 0.03) -> dict:
         """Calculate comprehensive portfolio performance metrics"""
         try:
-            # Basic return metrics
-            total_return = (1 + portfolio_returns).prod() - 1
-            ann_return = (1 + total_return) ** (252 / len(portfolio_returns)) - 1
+            # Handle empty or invalid portfolio returns
+            if portfolio_returns.empty:
+                return {
+                    'Total Return': 0.0,
+                    'Annualized Return': 0.0,
+                    'Annualized Volatility': 0.0,
+                    'Sharpe Ratio': 0.0,
+                    'Sortino Ratio': 0.0,
+                    'Max Drawdown': 0.0
+                }
+                
+            # Check for NaN values and handle them
+            if portfolio_returns.isnull().any():
+                logging.warning("NaN values found in portfolio returns. Filling with 0.")
+                portfolio_returns = portfolio_returns.fillna(0)
+                
+            # Basic return metrics with validation
+            try:
+                total_return = (1 + portfolio_returns).prod() - 1
+            except Exception as e:
+                logging.error(f"Error calculating total return: {str(e)}")
+                total_return = 0.0
+                
+            try:
+                ann_return = (1 + total_return) ** (252 / len(portfolio_returns)) - 1 if len(portfolio_returns) > 0 else 0.0
+            except Exception as e:
+                logging.error(f"Error calculating annualized return: {str(e)}")
+                ann_return = 0.0
             
-            # Risk metrics
-            daily_vol = portfolio_returns.std()
-            ann_vol = daily_vol * np.sqrt(252)
+            # Risk metrics with validation
+            try:
+                daily_vol = portfolio_returns.std()
+                ann_vol = daily_vol * np.sqrt(252)
+            except Exception as e:
+                logging.error(f"Error calculating volatility: {str(e)}")
+                daily_vol = 0.0
+                ann_vol = 0.0
             
-            # Maximum drawdown calculation
-            cum_returns = (1 + portfolio_returns).cumprod()
-            rolling_max = cum_returns.expanding().max()
-            drawdowns = cum_returns / rolling_max - 1
-            max_drawdown = drawdowns.min()
+            # Maximum drawdown calculation with validation
+            try:
+                cum_returns = (1 + portfolio_returns).cumprod()
+                rolling_max = cum_returns.expanding().max()
+                drawdowns = cum_returns / rolling_max - 1
+                max_drawdown = drawdowns.min()
+            except Exception as e:
+                logging.error(f"Error calculating drawdown: {str(e)}")
+                max_drawdown = 0.0
             
-            # Risk-adjusted metrics with proper annualization
-            daily_rf_rate = (1 + risk_free_rate) ** (1/252) - 1
-            excess_returns = portfolio_returns - daily_rf_rate
-            sharpe_ratio = np.sqrt(252) * excess_returns.mean() / daily_vol if daily_vol != 0 else 0
-            downside_returns = portfolio_returns[portfolio_returns < daily_rf_rate]
-            sortino_ratio = np.sqrt(252) * excess_returns.mean() / (downside_returns.std() or 1e-6)
+            # Risk-adjusted metrics with proper annualization and validation
+            try:
+                daily_rf_rate = (1 + risk_free_rate) ** (1/252) - 1
+                excess_returns = portfolio_returns - daily_rf_rate
+                sharpe_ratio = np.sqrt(252) * excess_returns.mean() / daily_vol if daily_vol > 0 else 0
+                downside_returns = portfolio_returns[portfolio_returns < daily_rf_rate]
+                sortino_ratio = np.sqrt(252) * excess_returns.mean() / (downside_returns.std() or 1e-6)
+            except Exception as e:
+                logging.error(f"Error calculating risk-adjusted metrics: {str(e)}")
+                sharpe_ratio = 0.0
+                sortino_ratio = 0.0
             
             return {
                 'Total Return': total_return,

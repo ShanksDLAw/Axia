@@ -40,7 +40,15 @@ class PortfolioOptimizer:
             # Calculate momentum and volatility signals
             returns_12m = self.returns_df.rolling(window=252).mean()
             volatility_3m = self.returns_df.rolling(window=63).std() * np.sqrt(252)
-            momentum_score = returns_12m.iloc[-1] / volatility_3m.iloc[-1]
+            
+            # Handle potential NaN values in momentum calculation
+            try:
+                momentum_score = returns_12m.iloc[-1] / volatility_3m.iloc[-1]
+                # Replace inf and NaN values with 0
+                momentum_score = momentum_score.replace([np.inf, -np.inf], 0).fillna(0)
+            except Exception as momentum_error:
+                logging.warning(f"Error calculating momentum score: {str(momentum_error)}. Using zeros.")
+                momentum_score = pd.Series(0, index=self.returns_df.columns)
             
             # Set dynamic constraints based on risk appetite and market regime
             constraints = {
@@ -50,41 +58,121 @@ class PortfolioOptimizer:
             }
             
             # Get optimized weights based on regime and risk appetite
-            if regime == 'Bearish':
-                weights, metrics = self._defensive_strategy(constraints)
-            elif regime == 'Bullish' and risk_appetite in ['Moderate', 'Aggressive']:
-                weights, metrics = self._aggressive_strategy(constraints, momentum_score)
-            else:
-                weights, metrics = self._balanced_strategy(constraints, momentum_score)
+            try:
+                if regime == 'Bearish':
+                    weights, metrics = self._defensive_strategy(constraints)
+                elif regime == 'Bullish' and risk_appetite in ['Moderate', 'Aggressive']:
+                    weights, metrics = self._aggressive_strategy(constraints, momentum_score)
+                else:
+                    weights, metrics = self._balanced_strategy(constraints, momentum_score)
+            except Exception as strategy_error:
+                logging.error(f"Strategy optimization failed: {str(strategy_error)}. Falling back to defensive strategy.")
+                try:
+                    weights, metrics = self._defensive_strategy(constraints)
+                except Exception as fallback_error:
+                    logging.error(f"Fallback strategy failed: {str(fallback_error)}. Using equal weights.")
+                    # Create equal weight portfolio as last resort
+                    valid_assets = [col for col in self.returns_df.columns if not self.returns_df[col].isnull().all()]
+                    if valid_assets:
+                        equal_weight = 1.0 / len(valid_assets)
+                        weights = {asset: equal_weight for asset in valid_assets}
+                        metrics = {
+                            'expected_return': 0.05,  # Conservative estimate
+                            'volatility': 0.15,      # Conservative estimate
+                            'sharpe_ratio': 0.33,    # Conservative estimate
+                            'warning': "Using equal weight fallback allocation."
+                        }
+                    else:
+                        # All cash if no valid assets
+                        weights = {'CASH': 1.0}
+                        metrics = {
+                            'expected_return': 0.02,  # Risk-free rate estimate
+                            'volatility': 0.0,
+                            'sharpe_ratio': 0.0,
+                            'warning': "No valid assets found. Using 100% cash allocation."
+                        }
             
-            # Apply dynamic volatility targeting
-            target_vol = 0.25 if risk_appetite == 'Aggressive' else (0.15 if risk_appetite == 'Moderate' else 0.10)
-            portfolio_vol = np.sqrt(self._calculate_portfolio_variance(weights))
-            vol_scalar = min(2.0, max(0.5, target_vol / portfolio_vol))
-            
-            # Scale weights and adjust cash position
-            scaled_weights = {k: v * vol_scalar for k, v in weights.items()}
-            cash_weight = max(0, 1 - sum(scaled_weights.values()))
-            if cash_weight > 0:
-                scaled_weights['CASH'] = cash_weight
-            
-            # Update metrics
-            metrics['volatility_target'] = target_vol
-            metrics['actual_volatility'] = portfolio_vol
-            metrics['cash_allocation'] = cash_weight
-            
-            return scaled_weights, metrics
+            # Apply dynamic volatility targeting with error handling
+            try:
+                target_vol = 0.25 if risk_appetite == 'Aggressive' else (0.15 if risk_appetite == 'Moderate' else 0.10)
+                if weights and any(weights.values()):
+                    portfolio_vol = np.sqrt(self._calculate_portfolio_variance(weights))
+                    if portfolio_vol > 0:
+                        vol_scalar = min(2.0, max(0.5, target_vol / portfolio_vol))
+                        # Scale weights and adjust cash position
+                        scaled_weights = {k: v * vol_scalar for k, v in weights.items()}
+                        cash_weight = max(0, 1 - sum(scaled_weights.values()))
+                        if cash_weight > 0:
+                            scaled_weights['CASH'] = cash_weight
+                        
+                        # Update metrics
+                        metrics['volatility_target'] = target_vol
+                        metrics['actual_volatility'] = portfolio_vol
+                        metrics['cash_allocation'] = cash_weight
+                        
+                        return scaled_weights, metrics
+                    else:
+                        logging.warning("Portfolio volatility is zero. Skipping volatility targeting.")
+                        if 'CASH' not in weights and sum(weights.values()) < 1.0:
+                            weights['CASH'] = 1.0 - sum(weights.values())
+                        return weights, metrics
+                else:
+                    logging.warning("Empty weights dictionary. Using 100% cash allocation.")
+                    return {'CASH': 1.0}, {
+                        'expected_return': 0.02,
+                        'volatility': 0.0,
+                        'sharpe_ratio': 0.0,
+                        'warning': "No valid weights found. Using 100% cash allocation."
+                    }
+            except Exception as vol_error:
+                logging.error(f"Volatility targeting failed: {str(vol_error)}. Using original weights.")
+                if 'CASH' not in weights and sum(weights.values()) < 1.0:
+                    weights['CASH'] = 1.0 - sum(weights.values())
+                return weights, metrics
             
         except Exception as e:
             logging.error(f"Portfolio optimization failed: {str(e)}")
-            # Return safe fallback allocation
-            return {}, {"warning": f"Optimization failed: {str(e)}. Using fallback allocation."}
+            # Return safe fallback allocation with 100% cash
+            return {'CASH': 1.0}, {
+                'expected_return': 0.02,
+                'volatility': 0.0,
+                'sharpe_ratio': 0.0,
+                'warning': f"Optimization failed: {str(e)}. Using 100% cash allocation."
+            }
 
 
     def _calculate_portfolio_variance(self, weights: dict) -> float:
-        """Calculate portfolio variance using the covariance matrix."""
-        weight_array = np.array([weights.get(asset, 0) for asset in self.price_data.columns])
-        return weight_array.T @ risk_models.sample_cov(self.price_data) @ weight_array
+        """Calculate portfolio variance using the covariance matrix with robust error handling."""
+        try:
+            # Handle empty weights or cash-only portfolio
+            if not weights or all(k == 'CASH' for k in weights.keys()):
+                return 0.0
+                
+            # Create weight array aligned with price data columns
+            weight_array = np.array([weights.get(asset, 0) for asset in self.price_data.columns])
+            
+            # Check if weight array contains any non-zero values
+            if np.sum(weight_array) == 0:
+                return 0.0
+                
+            # Calculate covariance matrix with error handling
+            try:
+                cov_matrix = risk_models.sample_cov(self.price_data)
+                portfolio_variance = weight_array.T @ cov_matrix @ weight_array
+                
+                # Validate result
+                if np.isnan(portfolio_variance) or portfolio_variance < 0:
+                    logging.warning(f"Invalid portfolio variance: {portfolio_variance}. Using default value.")
+                    return 0.15**2  # Default annualized variance
+                    
+                return portfolio_variance
+            except Exception as cov_error:
+                logging.error(f"Error calculating covariance matrix: {str(cov_error)}")
+                return 0.15**2  # Default annualized variance
+                
+        except Exception as e:
+            logging.error(f"Error in portfolio variance calculation: {str(e)}")
+            return 0.15**2  # Default annualized variance
 
     def _calculate_expected_returns(self, momentum_score=None, regime='Neutral', risk_appetite='Moderate'):
         """Calculate expected returns using multiple factors with enhanced risk-return adjustments."""
