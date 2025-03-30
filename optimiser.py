@@ -401,7 +401,7 @@ class PortfolioOptimizer:
             logging.error(f"Aggressive strategy optimization failed: {str(e)}")
             return self._defensive_strategy(constraints)
             
-    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None) -> tuple[dict[str, float], dict]:
+    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series) -> tuple[dict[str, float], dict]:
         """Balanced portfolio optimization with risk-adjusted momentum approach.
         
         Args:
@@ -541,20 +541,32 @@ class PortfolioOptimizer:
                 risk_score = volatility * abs(drawdown)
                 defensive_assets = risk_score.nsmallest(max(10, len(valid_assets) // 4)).index
                 
+            # Create risk-based sectors if no valid sectors exist
+            if not self.normalized_sectors or all(v == 'Uncategorized' for v in self.normalized_sectors.values()):
+                logging.warning("No valid sectors found. Creating risk-based sectors.")
+                # Calculate volatility for risk-based sector assignment
+                asset_vol = self.returns_df.std() * np.sqrt(252)
+                vol_tertiles = np.percentile(asset_vol, [33.33, 66.67])
+                
+                # Assign risk-based sectors
+                self.normalized_sectors = {}
+                for asset in self.price_data.columns:
+                    if asset == 'CASH':
+                        continue
+                    vol = asset_vol[asset]
+                    if vol <= vol_tertiles[0]:
+                        self.normalized_sectors[asset] = 'Low_Vol'
+                    elif vol <= vol_tertiles[1]:
+                        self.normalized_sectors[asset] = 'Mid_Vol'
+                    else:
+                        self.normalized_sectors[asset] = 'High_Vol'
+                        
+                logging.info(f"Created risk-based sectors: {dict(Counter(self.normalized_sectors.values()))}")
+            
             # Filter data to use only valid symbols with both price data and sector information
-            sector_symbols = set(self.normalized_sectors.keys())
-            price_symbols = set(self.price_data.columns)
-            valid_symbols = sector_symbols.intersection(price_symbols)
-            
-            # Log the number of valid symbols found
-            logging.info(f"Found {len(valid_symbols)} valid symbols with both price data and sector information")
-            
+            valid_symbols = [s for s in self.price_data.columns if s in self.normalized_sectors]
             if not valid_symbols:
-                logging.warning("No valid symbols found with both price data and sector information. Attempting fallback strategy.")
-                # Fallback to using all available price data symbols
-                valid_symbols = price_symbols
-                if not valid_symbols:
-                    raise ValueError("No valid symbols found in price data")
+                raise ValueError("No valid symbols found with sector information")
             
             # Filter data to use only valid symbols
             filtered_price_data = self.price_data[list(valid_symbols)]
@@ -651,33 +663,73 @@ class PortfolioOptimizer:
             logging.info(f"Sector distribution: {sector_counts}")
             
             # Enhanced sector handling for conservative allocation
-            if not sector_counts:
-                logging.warning("No valid sectors found. Creating conservative sector allocation.")
-                # Create default sectors based on risk characteristics
-                risk_based_sectors = {
-                    'Low_Vol': volatility[volatility <= np.percentile(volatility, 33)].index,
-                    'Mid_Vol': volatility[(volatility > np.percentile(volatility, 33)) & 
-                                        (volatility <= np.percentile(volatility, 67))].index,
-                    'High_Vol': volatility[volatility > np.percentile(volatility, 67)].index
-                }
-                
-                # Update sector mappings with risk-based sectors
-                for sector, symbols in risk_based_sectors.items():
-                    for symbol in symbols:
-                        self.normalized_sectors[symbol] = sector
-                
-                # Update sector counts
-                sector_counts = {sector: len(symbols) for sector, symbols in risk_based_sectors.items()}
-                logging.info(f"Created risk-based sectors: {sector_counts}")
-                
-                # Set conservative sector constraints with proper validation
-                constraints['max_sector'] = min(constraints.get('max_sector', 0.3), 0.4)
-                
-                # Update sector mappings with validated risk-based sectors
-                for sector, symbols in risk_based_sectors.items():
-                    for symbol in symbols:
-                        if symbol in valid_symbols:  # Only update valid symbols
-                            self.normalized_sectors[symbol] = sector
+            if not sector_counts or len(sector_counts) < 2:
+                logging.warning("Insufficient sector distribution. Creating enhanced risk-based sectors.")
+                try:
+                    # Filter out any extreme values
+                    valid_vol = volatility[np.isfinite(volatility)]
+                    if len(valid_vol) < len(volatility):
+                        logging.warning(f"Filtered out {len(volatility) - len(valid_vol)} invalid volatility values")
+                    
+                    # Calculate percentiles with error handling
+                    try:
+                        vol_tertiles = np.percentile(valid_vol, [33.33, 66.67])
+                    except Exception as e:
+                        logging.error(f"Error calculating volatility percentiles: {str(e)}")
+                        # Fallback to simple sorting if percentile calculation fails
+                        sorted_vol = np.sort(valid_vol)
+                        n = len(sorted_vol)
+                        vol_tertiles = [sorted_vol[n//3], sorted_vol[2*n//3]]
+                    
+                    # Create risk-based sectors with validation
+                    risk_based_sectors = defaultdict(list)
+                    for asset in valid_symbols:
+                        if asset == 'CASH':
+                            continue
+                        try:
+                            vol = volatility[asset]
+                            if not np.isfinite(vol):
+                                continue
+                            if vol <= vol_tertiles[0]:
+                                risk_based_sectors['Low_Vol'].append(asset)
+                            elif vol <= vol_tertiles[1]:
+                                risk_based_sectors['Mid_Vol'].append(asset)
+                            else:
+                                risk_based_sectors['High_Vol'].append(asset)
+                        except Exception as e:
+                            logging.warning(f"Error assigning sector for {asset}: {str(e)}")
+                            continue
+                    
+                    # Ensure each sector has at least some assets
+                    min_assets_per_sector = max(3, len(valid_symbols) // 10)
+                    for sector in ['Low_Vol', 'Mid_Vol', 'High_Vol']:
+                        if len(risk_based_sectors[sector]) < min_assets_per_sector:
+                            logging.warning(f"Insufficient assets in {sector}. Adjusting thresholds.")
+                            # Redistribute assets if a sector is too small
+                            all_assets = [a for a in valid_symbols if a != 'CASH']
+                            sorted_by_vol = sorted(all_assets, key=lambda x: volatility[x])
+                            n_assets = len(sorted_by_vol)
+                            risk_based_sectors['Low_Vol'] = sorted_by_vol[:n_assets//3]
+                            risk_based_sectors['Mid_Vol'] = sorted_by_vol[n_assets//3:2*n_assets//3]
+                            risk_based_sectors['High_Vol'] = sorted_by_vol[2*n_assets//3:]
+                            break
+                    
+                    # Update sector mappings and constraints
+                    self.normalized_sectors = {}
+                    for sector, assets in risk_based_sectors.items():
+                        for asset in assets:
+                            self.normalized_sectors[asset] = sector
+                    
+                    # Update sector counts and log distribution
+                    sector_counts = {sector: len(assets) for sector, assets in risk_based_sectors.items()}
+                    logging.info(f"Created enhanced risk-based sectors: {sector_counts}")
+                    
+                    # Adjust constraints for better risk management
+                    constraints['max_sector'] = min(constraints.get('max_sector', 0.3), 0.4)
+                    
+                except Exception as e:
+                    logging.error(f"Error creating risk-based sectors: {str(e)}")
+                    raise ValueError("Failed to create valid sector distribution")
             
             # Calculate sector metrics with enhanced risk appetite consideration and validation
             sector_vols = {}
@@ -708,30 +760,80 @@ class PortfolioOptimizer:
                         threshold = np.percentile(volatility, 67)
                         symbols = volatility[volatility > threshold].index
                     
+                    # Ensure we have symbols for this sector with enhanced error handling
+                    if len(symbols) == 0:
+                        logging.warning(f"No symbols found for {sector}. Creating default symbols.")
+                        # Assign at least some symbols to this sector to prevent errors
+                        all_symbols = list(valid_symbols)
+                        if len(all_symbols) == 0:
+                            logging.error(f"No valid symbols available for {sector} assignment")
+                            # Create a dummy symbol to prevent errors
+                            continue
+                            
+                        # Different allocation strategies based on sector
+                        if sector == 'Mid_Vol':
+                            # Ensure Mid_Vol has some symbols by taking middle portion of available symbols
+                            if len(all_symbols) >= 3:
+                                start_idx = len(all_symbols) // 3
+                                end_idx = 2 * len(all_symbols) // 3
+                                symbols = all_symbols[start_idx:end_idx]
+                            else:
+                                # For small symbol lists, just take the middle or first symbol
+                                symbols = [all_symbols[len(all_symbols)//2]] if len(all_symbols) > 1 else all_symbols
+                        elif sector == 'Low_Vol':
+                            # For Low_Vol, take first third or at least one symbol
+                            symbols = all_symbols[:max(1, len(all_symbols)//3)]
+                        elif sector == 'High_Vol':
+                            # For High_Vol, take last third or at least one symbol
+                            symbols = all_symbols[-max(1, len(all_symbols)//3):]
+                        else:
+                            # For any other sector, distribute evenly
+                            symbols = all_symbols[:max(1, len(all_symbols)//len(required_sectors))]
+                    
+                    # Update sector mappings
                     for symbol in symbols:
                         if symbol in valid_symbols:
                             self.normalized_sectors[symbol] = sector
+                            
+                # Verify sectors were created successfully
+                for sector in missing_sectors:
+                    sector_symbols = [s for s, sec in self.normalized_sectors.items() if sec == sector and s in valid_symbols]
+                    if not sector_symbols:
+                        logging.warning(f"Failed to create {sector}. Adding to sector_counts with zero count.")
+                        sector_counts[sector] = 0
             
             for sector, count in sector_counts.items():
                 try:
                     # Get symbols in this sector
                     sector_symbols = [s for s, sec in self.normalized_sectors.items() if sec == sector and s in valid_symbols]
+                    
+                    # Enhanced validation for empty sectors
                     if not sector_symbols:
+                        logging.warning(f"No symbols found for sector {sector}. Using fallback values.")
+                        # Use fallback values for empty sectors
+                        sector_vols[sector] = np.median(volatility) * risk_multiplier
+                        sector_returns[sector] = np.median(filtered_returns) * risk_multiplier
                         continue
                         
                     # Calculate sector volatility with risk adjustment
-                    sector_returns_data = filtered_returns[sector_symbols]
-                    if len(sector_returns_data) > 0:
-                        base_vol = np.std(sector_returns_data)
-                        sector_vols[sector] = base_vol * risk_multiplier
-                    else:
-                        sector_vols[sector] = np.median(filtered_returns.std()) * risk_multiplier
-                    
-                    # Calculate sector returns with risk-adjusted expectations
-                    if len(sector_returns_data) > 0:
-                        base_return = np.mean(sector_returns_data)
-                        sector_returns[sector] = base_return * risk_multiplier
-                    else:
+                    try:
+                        sector_returns_data = filtered_returns[sector_symbols]
+                        if len(sector_returns_data) > 0:
+                            base_vol = np.std(sector_returns_data)
+                            sector_vols[sector] = base_vol * risk_multiplier
+                        else:
+                            sector_vols[sector] = np.median(filtered_returns.std()) * risk_multiplier
+                        
+                        # Calculate sector returns with risk-adjusted expectations
+                        if len(sector_returns_data) > 0:
+                            base_return = np.mean(sector_returns_data)
+                            sector_returns[sector] = base_return * risk_multiplier
+                        else:
+                            sector_returns[sector] = np.median(filtered_returns) * risk_multiplier
+                    except Exception as data_error:
+                        logging.warning(f"Error processing data for sector {sector}: {str(data_error)}")
+                        # Use fallback values based on overall portfolio metrics
+                        sector_vols[sector] = np.median(volatility) * risk_multiplier
                         sector_returns[sector] = np.median(filtered_returns) * risk_multiplier
                 except Exception as e:
                     logging.warning(f"Error calculating metrics for sector {sector}: {str(e)}")
@@ -789,8 +891,16 @@ class PortfolioOptimizer:
                         sector_lower[sector] = 0.3 if risk_appetite == 'Conservative' else 0.2
                         sector_upper[sector] = min(0.6, base_max * 1.2) if risk_appetite == 'Conservative' else min(0.5, base_max * 1.1)
                     elif sector == 'Mid_Vol':
-                        sector_lower[sector] = 0.2 if risk_appetite != 'Aggressive' else 0.15
-                        sector_upper[sector] = min(0.4, base_max * 1.1) if risk_appetite != 'Aggressive' else min(0.45, base_max * 1.2)
+                        # Handle Mid_Vol sector with additional validation
+                        if count > 0:  # Only set constraints if sector has assets
+                            sector_lower[sector] = 0.2 if risk_appetite != 'Aggressive' else 0.15
+                            sector_upper[sector] = min(0.4, base_max * 1.1) if risk_appetite != 'Aggressive' else min(0.45, base_max * 1.2)
+                        else:
+                            # Set default values for empty sector to prevent errors
+                            sector_lower[sector] = 0.0
+                            sector_upper[sector] = 0.0
+                            logging.warning(f"Skipping empty sector: {sector}")
+                            continue
                     else:  # High_Vol
                         sector_lower[sector] = 0.1
                         sector_upper[sector] = min(0.3, base_max) if risk_appetite == 'Conservative' else min(0.4, base_max * 1.2)
@@ -1635,42 +1745,34 @@ class PortfolioOptimizer:
             logging.error(f"Error calculating portfolio metrics: {str(e)}")
             raise ValueError(f"Portfolio optimization failed: {str(e)}")
     
-    def _balanced_strategy(self, constraints: dict) -> tuple[dict[str, float], dict[str, float]]:
-        """Balanced portfolio optimization with enhanced constraint handling and risk management"""
-        try:
-            # Ensure normalized sectors are available
-            if not hasattr(self, 'normalized_sectors'):
-                # Map sectors to ensure consistency with asset_loader.py
-                sector_mapping = {
-                    'Consumer Cyclical': 'Consumer Discretionary',
-                    'Consumer Defensive': 'Consumer Staples',
-                    'Financial': 'Financial Services',
-                    'Technology': 'Information Technology',
-                    'Basic Materials': 'Materials'
-                }
+    # The _balanced_strategy method is already defined at line 404, so we're removing this duplicate definition
                 
-                # Create a normalized sectors dictionary for optimization
-                normalized_sectors = {}
-                for symbol, sector in self.sectors.items():
-                    normalized_sectors[symbol] = sector_mapping.get(sector, sector)
+            # Create risk-based sectors if no valid sectors exist
+            if not self.normalized_sectors or all(v == 'Uncategorized' for v in self.normalized_sectors.values()):
+                logging.warning("No valid sectors found. Creating risk-based sectors.")
+                # Calculate volatility for risk-based sector assignment
+                asset_vol = self.returns_df.std() * np.sqrt(252)
+                vol_tertiles = np.percentile(asset_vol, [33.33, 66.67])
                 
-                # Use normalized sectors for optimization
-                self.normalized_sectors = normalized_sectors
-                
+                # Assign risk-based sectors
+                self.normalized_sectors = {}
+                for asset in self.price_data.columns:
+                    if asset == 'CASH':
+                        continue
+                    vol = asset_vol[asset]
+                    if vol <= vol_tertiles[0]:
+                        self.normalized_sectors[asset] = 'Low_Vol'
+                    elif vol <= vol_tertiles[1]:
+                        self.normalized_sectors[asset] = 'Mid_Vol'
+                    else:
+                        self.normalized_sectors[asset] = 'High_Vol'
+                        
+                logging.info(f"Created risk-based sectors: {dict(Counter(self.normalized_sectors.values()))}")
+            
             # Filter data to use only valid symbols with both price data and sector information
-            sector_symbols = set(self.normalized_sectors.keys())
-            price_symbols = set(self.price_data.columns)
-            valid_symbols = sector_symbols.intersection(price_symbols)
-            
-            # Log the number of valid symbols found
-            logging.info(f"Found {len(valid_symbols)} valid symbols with both price data and sector information")
-            
+            valid_symbols = [s for s in self.price_data.columns if s in self.normalized_sectors]
             if not valid_symbols:
-                logging.warning("No valid symbols found with both price data and sector information. Attempting fallback strategy.")
-                # Fallback to using all available price data symbols
-                valid_symbols = price_symbols
-                if not valid_symbols:
-                    raise ValueError("No valid symbols found in price data")
+                raise ValueError("No valid symbols found with sector information")
             
             # Filter data to use only valid symbols
             filtered_price_data = self.price_data[list(valid_symbols)]
@@ -1767,33 +1869,73 @@ class PortfolioOptimizer:
             logging.info(f"Sector distribution: {sector_counts}")
             
             # Enhanced sector handling for conservative allocation
-            if not sector_counts:
-                logging.warning("No valid sectors found. Creating conservative sector allocation.")
-                # Create default sectors based on risk characteristics
-                risk_based_sectors = {
-                    'Low_Vol': volatility[volatility <= np.percentile(volatility, 33)].index,
-                    'Mid_Vol': volatility[(volatility > np.percentile(volatility, 33)) & 
-                                        (volatility <= np.percentile(volatility, 67))].index,
-                    'High_Vol': volatility[volatility > np.percentile(volatility, 67)].index
-                }
-                
-                # Update sector mappings with risk-based sectors
-                for sector, symbols in risk_based_sectors.items():
-                    for symbol in symbols:
-                        self.normalized_sectors[symbol] = sector
-                
-                # Update sector counts
-                sector_counts = {sector: len(symbols) for sector, symbols in risk_based_sectors.items()}
-                logging.info(f"Created risk-based sectors: {sector_counts}")
-                
-                # Set conservative sector constraints with proper validation
-                constraints['max_sector'] = min(constraints.get('max_sector', 0.3), 0.4)
-                
-                # Update sector mappings with validated risk-based sectors
-                for sector, symbols in risk_based_sectors.items():
-                    for symbol in symbols:
-                        if symbol in valid_symbols:  # Only update valid symbols
-                            self.normalized_sectors[symbol] = sector
+            if not sector_counts or len(sector_counts) < 2:
+                logging.warning("Insufficient sector distribution. Creating enhanced risk-based sectors.")
+                try:
+                    # Filter out any extreme values
+                    valid_vol = volatility[np.isfinite(volatility)]
+                    if len(valid_vol) < len(volatility):
+                        logging.warning(f"Filtered out {len(volatility) - len(valid_vol)} invalid volatility values")
+                    
+                    # Calculate percentiles with error handling
+                    try:
+                        vol_tertiles = np.percentile(valid_vol, [33.33, 66.67])
+                    except Exception as e:
+                        logging.error(f"Error calculating volatility percentiles: {str(e)}")
+                        # Fallback to simple sorting if percentile calculation fails
+                        sorted_vol = np.sort(valid_vol)
+                        n = len(sorted_vol)
+                        vol_tertiles = [sorted_vol[n//3], sorted_vol[2*n//3]]
+                    
+                    # Create risk-based sectors with validation
+                    risk_based_sectors = defaultdict(list)
+                    for asset in valid_symbols:
+                        if asset == 'CASH':
+                            continue
+                        try:
+                            vol = volatility[asset]
+                            if not np.isfinite(vol):
+                                continue
+                            if vol <= vol_tertiles[0]:
+                                risk_based_sectors['Low_Vol'].append(asset)
+                            elif vol <= vol_tertiles[1]:
+                                risk_based_sectors['Mid_Vol'].append(asset)
+                            else:
+                                risk_based_sectors['High_Vol'].append(asset)
+                        except Exception as e:
+                            logging.warning(f"Error assigning sector for {asset}: {str(e)}")
+                            continue
+                    
+                    # Ensure each sector has at least some assets
+                    min_assets_per_sector = max(3, len(valid_symbols) // 10)
+                    for sector in ['Low_Vol', 'Mid_Vol', 'High_Vol']:
+                        if len(risk_based_sectors[sector]) < min_assets_per_sector:
+                            logging.warning(f"Insufficient assets in {sector}. Adjusting thresholds.")
+                            # Redistribute assets if a sector is too small
+                            all_assets = [a for a in valid_symbols if a != 'CASH']
+                            sorted_by_vol = sorted(all_assets, key=lambda x: volatility[x])
+                            n_assets = len(sorted_by_vol)
+                            risk_based_sectors['Low_Vol'] = sorted_by_vol[:n_assets//3]
+                            risk_based_sectors['Mid_Vol'] = sorted_by_vol[n_assets//3:2*n_assets//3]
+                            risk_based_sectors['High_Vol'] = sorted_by_vol[2*n_assets//3:]
+                            break
+                    
+                    # Update sector mappings and constraints
+                    self.normalized_sectors = {}
+                    for sector, assets in risk_based_sectors.items():
+                        for asset in assets:
+                            self.normalized_sectors[asset] = sector
+                    
+                    # Update sector counts and log distribution
+                    sector_counts = {sector: len(assets) for sector, assets in risk_based_sectors.items()}
+                    logging.info(f"Created enhanced risk-based sectors: {sector_counts}")
+                    
+                    # Adjust constraints for better risk management
+                    constraints['max_sector'] = min(constraints.get('max_sector', 0.3), 0.4)
+                    
+                except Exception as e:
+                    logging.error(f"Error creating risk-based sectors: {str(e)}")
+                    raise ValueError("Failed to create valid sector distribution")
             
             # Calculate sector metrics with enhanced risk appetite consideration and validation
             sector_vols = {}
@@ -1824,30 +1966,80 @@ class PortfolioOptimizer:
                         threshold = np.percentile(volatility, 67)
                         symbols = volatility[volatility > threshold].index
                     
+                    # Ensure we have symbols for this sector with enhanced error handling
+                    if len(symbols) == 0:
+                        logging.warning(f"No symbols found for {sector}. Creating default symbols.")
+                        # Assign at least some symbols to this sector to prevent errors
+                        all_symbols = list(valid_symbols)
+                        if len(all_symbols) == 0:
+                            logging.error(f"No valid symbols available for {sector} assignment")
+                            # Create a dummy symbol to prevent errors
+                            continue
+                            
+                        # Different allocation strategies based on sector
+                        if sector == 'Mid_Vol':
+                            # Ensure Mid_Vol has some symbols by taking middle portion of available symbols
+                            if len(all_symbols) >= 3:
+                                start_idx = len(all_symbols) // 3
+                                end_idx = 2 * len(all_symbols) // 3
+                                symbols = all_symbols[start_idx:end_idx]
+                            else:
+                                # For small symbol lists, just take the middle or first symbol
+                                symbols = [all_symbols[len(all_symbols)//2]] if len(all_symbols) > 1 else all_symbols
+                        elif sector == 'Low_Vol':
+                            # For Low_Vol, take first third or at least one symbol
+                            symbols = all_symbols[:max(1, len(all_symbols)//3)]
+                        elif sector == 'High_Vol':
+                            # For High_Vol, take last third or at least one symbol
+                            symbols = all_symbols[-max(1, len(all_symbols)//3):]
+                        else:
+                            # For any other sector, distribute evenly
+                            symbols = all_symbols[:max(1, len(all_symbols)//len(required_sectors))]
+                    
+                    # Update sector mappings
                     for symbol in symbols:
                         if symbol in valid_symbols:
                             self.normalized_sectors[symbol] = sector
+                            
+                # Verify sectors were created successfully
+                for sector in missing_sectors:
+                    sector_symbols = [s for s, sec in self.normalized_sectors.items() if sec == sector and s in valid_symbols]
+                    if not sector_symbols:
+                        logging.warning(f"Failed to create {sector}. Adding to sector_counts with zero count.")
+                        sector_counts[sector] = 0
             
             for sector, count in sector_counts.items():
                 try:
                     # Get symbols in this sector
                     sector_symbols = [s for s, sec in self.normalized_sectors.items() if sec == sector and s in valid_symbols]
+                    
+                    # Enhanced validation for empty sectors
                     if not sector_symbols:
+                        logging.warning(f"No symbols found for sector {sector}. Using fallback values.")
+                        # Use fallback values for empty sectors
+                        sector_vols[sector] = np.median(volatility) * risk_multiplier
+                        sector_returns[sector] = np.median(filtered_returns) * risk_multiplier
                         continue
                         
                     # Calculate sector volatility with risk adjustment
-                    sector_returns_data = filtered_returns[sector_symbols]
-                    if len(sector_returns_data) > 0:
-                        base_vol = np.std(sector_returns_data)
-                        sector_vols[sector] = base_vol * risk_multiplier
-                    else:
-                        sector_vols[sector] = np.median(filtered_returns.std()) * risk_multiplier
-                    
-                    # Calculate sector returns with risk-adjusted expectations
-                    if len(sector_returns_data) > 0:
-                        base_return = np.mean(sector_returns_data)
-                        sector_returns[sector] = base_return * risk_multiplier
-                    else:
+                    try:
+                        sector_returns_data = filtered_returns[sector_symbols]
+                        if len(sector_returns_data) > 0:
+                            base_vol = np.std(sector_returns_data)
+                            sector_vols[sector] = base_vol * risk_multiplier
+                        else:
+                            sector_vols[sector] = np.median(filtered_returns.std()) * risk_multiplier
+                        
+                        # Calculate sector returns with risk-adjusted expectations
+                        if len(sector_returns_data) > 0:
+                            base_return = np.mean(sector_returns_data)
+                            sector_returns[sector] = base_return * risk_multiplier
+                        else:
+                            sector_returns[sector] = np.median(filtered_returns) * risk_multiplier
+                    except Exception as data_error:
+                        logging.warning(f"Error processing data for sector {sector}: {str(data_error)}")
+                        # Use fallback values based on overall portfolio metrics
+                        sector_vols[sector] = np.median(volatility) * risk_multiplier
                         sector_returns[sector] = np.median(filtered_returns) * risk_multiplier
                 except Exception as e:
                     logging.warning(f"Error calculating metrics for sector {sector}: {str(e)}")
@@ -1905,8 +2097,16 @@ class PortfolioOptimizer:
                         sector_lower[sector] = 0.3 if risk_appetite == 'Conservative' else 0.2
                         sector_upper[sector] = min(0.6, base_max * 1.2) if risk_appetite == 'Conservative' else min(0.5, base_max * 1.1)
                     elif sector == 'Mid_Vol':
-                        sector_lower[sector] = 0.2 if risk_appetite != 'Aggressive' else 0.15
-                        sector_upper[sector] = min(0.4, base_max * 1.1) if risk_appetite != 'Aggressive' else min(0.45, base_max * 1.2)
+                        # Handle Mid_Vol sector with additional validation
+                        if count > 0:  # Only set constraints if sector has assets
+                            sector_lower[sector] = 0.2 if risk_appetite != 'Aggressive' else 0.15
+                            sector_upper[sector] = min(0.4, base_max * 1.1) if risk_appetite != 'Aggressive' else min(0.45, base_max * 1.2)
+                        else:
+                            # Set default values for empty sector to prevent errors
+                            sector_lower[sector] = 0.0
+                            sector_upper[sector] = 0.0
+                            logging.warning(f"Skipping empty sector: {sector}")
+                            continue
                     else:  # High_Vol
                         sector_lower[sector] = 0.1
                         sector_upper[sector] = min(0.3, base_max) if risk_appetite == 'Conservative' else min(0.4, base_max * 1.2)
