@@ -76,7 +76,7 @@ class PortfolioOptimizer:
                         constraints['max_position'] = min(constraints['max_position'] * 1.2, 0.1)  # Slightly increase limits
                     weights, metrics = self._aggressive_strategy(constraints, momentum_score)
                 else:
-                    weights, metrics = self._balanced_strategy(constraints)
+                    weights, metrics = self._balanced_strategy(constraints, momentum_score)
             except Exception as strategy_error:
                 logging.error(f"Strategy optimization failed: {str(strategy_error)}. Falling back to defensive strategy.")
                 try:
@@ -271,22 +271,45 @@ class PortfolioOptimizer:
             if len(common_assets) == 0:
                 raise ValueError("No common assets between price data and momentum score")
             
-            # Calculate expected returns with momentum for common assets
-            expected_returns = self._calculate_expected_returns(momentum_score[common_assets])
+            # Calculate expected returns with enhanced momentum and risk-adjusted returns
+            expected_returns = self._calculate_expected_returns(
+                momentum_score[common_assets],
+                regime='Bullish',  # Aggressive strategy implies bullish outlook
+                risk_appetite='Aggressive'
+            )
             
-            # Enhanced momentum filtering for aggressive strategy
+            # Enhanced momentum filtering with sector-aware selection
             valid_momentum = momentum_score[common_assets]
-            top_momentum_threshold = np.percentile(valid_momentum, 85)  # More selective asset filtering
+            sector_groups = defaultdict(list)
+            for asset in common_assets:
+                if asset in self.sectors:
+                    sector_groups[self.sectors[asset]].append(asset)
+            
+            # Select top assets from each sector
+            selected_assets = []
+            for sector, assets in sector_groups.items():
+                if len(assets) > 0:
+                    sector_momentum = valid_momentum[assets]
+                    top_sector_assets = sector_momentum.nlargest(max(2, len(assets) // 3)).index
+                    selected_assets.extend(top_sector_assets)
+            
+            # Add top momentum assets overall to ensure sufficient diversification
+            top_momentum_threshold = np.percentile(valid_momentum, 70)  # Less restrictive filtering
             high_momentum_assets = valid_momentum[valid_momentum >= top_momentum_threshold].index
+            selected_assets.extend([asset for asset in high_momentum_assets if asset not in selected_assets])
             
-            # Ensure minimum number of assets for diversification
-            if len(high_momentum_assets) < 10:
-                top_momentum_threshold = np.percentile(valid_momentum, 70)
-                high_momentum_assets = valid_momentum[valid_momentum >= top_momentum_threshold].index
+            # Prepare optimization universe with aggressive return expectations
+            optimization_universe = list(set(selected_assets))  # Remove duplicates
+            if len(optimization_universe) < 15:  # Ensure minimum diversification
+                additional_assets = valid_momentum.nlargest(15).index.difference(optimization_universe)
+                optimization_universe.extend(additional_assets[:15-len(optimization_universe)])
             
-            # Prepare optimization universe with enhanced return expectations
-            optimization_universe = list(high_momentum_assets)
-            filtered_returns = expected_returns[optimization_universe] * 1.2  # Amplify return expectations
+            # Calculate sector-adjusted return expectations
+            filtered_returns = expected_returns[optimization_universe].copy()
+            for asset in optimization_universe:
+                momentum_rank = valid_momentum[asset] / valid_momentum.max()
+                sector_bonus = 0.2 if asset in self.sectors else 0.0  # Bonus for sector-classified assets
+                filtered_returns[asset] *= (1.5 + momentum_rank + sector_bonus)  # More aggressive scaling
             
             # Calculate risk model with enhanced stability for bullish market conditions
             try:
@@ -319,16 +342,30 @@ class PortfolioOptimizer:
                 risk_model = 0.8 * returns.mean() + 0.2 * np.diag(np.diag(returns.mean()))
                 risk_model = np.array(risk_model)
             
-            # Set up efficient frontier with more aggressive parameters
-            max_position = min(0.25, constraints['max_position'] * 1.5)  # Allow higher position limits
+            # Set up efficient frontier with more aggressive parameters and sector constraints
+            max_position = min(0.35, constraints['max_position'] * 2.0)  # More aggressive position limits
+            min_position = 0.02  # Ensure meaningful positions
+            
+            # Initialize efficient frontier with tighter bounds
             ef = EfficientFrontier(
                 filtered_returns,
                 risk_model,
-                weight_bounds=(0, max_position)
+                weight_bounds=(min_position, max_position)
             )
             
-            # Add objective function for L2 regularization
-            ef.add_objective(objective_functions.L2_reg, gamma=0.05)  # Minimal regularization
+            # Add sector constraints
+            sector_constraints = defaultdict(list)
+            for asset in optimization_universe:
+                if asset in self.sectors:
+                    sector_constraints[self.sectors[asset]].append(asset)
+            
+            # Set sector-level constraints
+            for sector, assets in sector_constraints.items():
+                ef.add_sector_constraints(assets, min_weight=0.1, max_weight=0.4)
+            
+            # Add objective functions for aggressive optimization
+            ef.add_objective(objective_functions.L2_reg, gamma=0.03)  # Reduced regularization
+            ef.add_objective(objective_functions.transaction_cost, w_prev=None, k=0.001)  # Consider transaction costs
             
             # Optimize for maximum Sharpe ratio
             try:
@@ -360,14 +397,25 @@ class PortfolioOptimizer:
             return self._defensive_strategy(constraints)
             
     def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None) -> tuple[dict[str, float], dict]:
-        """Balanced portfolio optimization with risk-adjusted momentum approach."""
-        # Get risk appetite from constraints or default to Moderate
-        risk_appetite = constraints.get('risk_appetite', 'Moderate')
-        """Balanced portfolio optimization with risk-adjusted momentum approach."""
+        """Balanced portfolio optimization with risk-adjusted momentum approach.
+        
+        Args:
+            constraints: Dictionary containing optimization constraints
+            momentum_score: Optional momentum scores for assets
+            
+        Returns:
+            tuple: (optimized weights dictionary, portfolio metrics dictionary)
+        """
         try:
-            # Handle case when momentum_score is None
+            # Get risk appetite from constraints or default to Moderate
+            risk_appetite = constraints.get('risk_appetite', 'Moderate')
+            
+            # Initialize momentum scores if not provided
             if momentum_score is None:
                 momentum_score = pd.Series(1.0, index=self.price_data.columns)
+                
+            # Calculate volatility for risk-based filtering
+            volatility = self.returns_df.std() * np.sqrt(252)
             
             # Ensure alignment between price data and momentum score
             common_assets = self.price_data.columns.intersection(momentum_score.index)
