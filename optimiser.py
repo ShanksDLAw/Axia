@@ -21,10 +21,18 @@ class PortfolioOptimizer:
         self.returns_df = price_data.pct_change().dropna()
         # Calculate expected returns using historical mean
         self.expected_returns = self.returns_df.mean()
-        # Initialize sectors attribute
-        self.sectors = sectors
+        # Initialize sectors attribute with default if none provided
+        self.sectors = sectors if sectors else self._create_default_sectors()
         # Normalize sectors for consistent access
-        self.normalized_sectors = {k: v for k, v in sectors.items()} if sectors else {}
+        self.normalized_sectors = {k: v for k, v in self.sectors.items()}
+        
+    def _create_default_sectors(self) -> dict:
+        """Create default sector allocation if none provided."""
+        default_sectors = {}
+        for asset in self.price_data.columns:
+            if asset != 'CASH':
+                default_sectors[asset] = 'Uncategorized'
+        return default_sectors
 
     def optimize(self, regime: str, risk_appetite: str) -> tuple[dict[str, float], dict]:
         """Optimize portfolio based on investment regime and risk appetite.
@@ -238,12 +246,25 @@ class PortfolioOptimizer:
             optimization_universe = list(high_momentum_assets)
             filtered_returns = expected_returns[optimization_universe] * 1.2  # Amplify return expectations
             
-            # Calculate risk model with stronger emphasis on recent market behavior
-            price_data_recent = self.price_data[optimization_universe].tail(63)  # Last 3 months for higher responsiveness
-            risk_model = risk_models.CovarianceShrinkage(
-                price_data_recent,
-                frequency=252
-            ).ledoit_wolf()
+            # Calculate risk model with stronger emphasis on recent market behavior and enhanced stability
+            try:
+                price_data_recent = self.price_data[optimization_universe].tail(63)  # Last 3 months for higher responsiveness
+                risk_model = risk_models.CovarianceShrinkage(
+                    price_data_recent,
+                    frequency=252
+                ).ledoit_wolf()
+                
+                # Check if the matrix is positive semidefinite
+                min_eigenval = np.min(np.linalg.eigvals(risk_model))
+                if min_eigenval < 1e-8:
+                    # Add a small positive value to the diagonal
+                    logging.info("Fixing non-positive semidefinite covariance matrix in aggressive strategy")
+                    risk_model += np.eye(len(risk_model)) * (abs(min_eigenval) + 1e-8)
+            except Exception as e:
+                logging.warning(f"Error in aggressive strategy covariance calculation: {str(e)}. Using sample covariance.")
+                # Fallback to simpler covariance with stability enhancement
+                risk_model = risk_models.sample_cov(self.price_data[optimization_universe], frequency=252)
+                risk_model += np.eye(len(risk_model)) * 1e-6
             
             # Set up efficient frontier with more aggressive parameters
             max_position = min(0.25, constraints['max_position'] * 1.5)  # Allow higher position limits
@@ -258,7 +279,10 @@ class PortfolioOptimizer:
             ef.add_objective(objective_functions.MaxSharpe(risk_free_rate=0.01))  # Lower risk-free rate for higher allocation to risky assets
             
             # Optimize and clean weights
-            weights = ef.optimize()
+            # The EfficientFrontier class doesn't have an 'optimize' method directly
+            # Instead, we need to call a specific optimization method like max_sharpe()
+            ef.max_sharpe(risk_free_rate=0.01)
+            weights = ef.weights
             cleaned_weights = ef.clean_weights(cutoff=0.02)
             
             # Calculate portfolio metrics
@@ -276,7 +300,7 @@ class PortfolioOptimizer:
             logging.error(f"Aggressive strategy optimization failed: {str(e)}")
             return self._defensive_strategy(constraints)
             
-    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series) -> tuple[dict[str, float], dict]:
+    def _balanced_strategy(self, constraints: dict, momentum_score: pd.Series = None, regime: str = 'Neutral') -> tuple[dict[str, float], dict]:
         """Balanced portfolio optimization with risk-adjusted momentum approach."""
         try:
             # Ensure alignment between price data and momentum score
@@ -295,11 +319,32 @@ class PortfolioOptimizer:
                 valid_assets = valid_momentum.nlargest(max(10, len(common_assets) // 4)).index
             filtered_returns = expected_returns[valid_assets]
             
-            # Calculate risk model with balanced lookback
-            risk_model = risk_models.CovarianceShrinkage(
-                self.price_data[valid_assets],
-                frequency=252
-            ).ledoit_wolf()
+            # Calculate risk model with enhanced stability and regularization
+            try:
+                # Use exponential weighted covariance for recent market sensitivity
+                returns = self.returns_df[valid_assets].ewm(halflife=63).cov()
+                latest_cov = returns.iloc[-252:]
+                
+                # Apply shrinkage to stabilize the covariance matrix
+                shrinkage = risk_models.CovarianceShrinkage(
+                    self.price_data[valid_assets].tail(252),
+                    frequency=252
+                )
+                risk_model = shrinkage.ledoit_wolf()
+                
+                # Ensure positive semidefiniteness
+                min_eigenval = np.min(np.linalg.eigvals(risk_model))
+                if min_eigenval < 1e-8:
+                    # Add regularization term
+                    delta = abs(min_eigenval) + 1e-8
+                    n_assets = len(risk_model)
+                    risk_model = (1 - delta) * risk_model + delta * np.eye(n_assets) * np.trace(risk_model) / n_assets
+                    logging.info("Applied enhanced regularization to ensure matrix stability")
+            except Exception as e:
+                logging.warning(f"Advanced risk model failed: {str(e)}. Using robust fallback.")
+                # Robust fallback using sample covariance with strong regularization
+                sample_cov = risk_models.sample_cov(self.price_data[valid_assets].tail(126), frequency=252)
+                risk_model = 0.8 * sample_cov + 0.2 * np.diag(np.diag(sample_cov))
             
             # Set up efficient frontier with balanced parameters
             ef = EfficientFrontier(
@@ -310,10 +355,9 @@ class PortfolioOptimizer:
             
             # Add balanced objective functions
             ef.add_objective(objective_functions.L2_reg, gamma=0.5)  # Moderate regularization
-            ef.add_objective(objective_functions.MaxSharpe(risk_free_rate=0.015))  # Moderate risk-free rate
             
-            # Optimize and clean weights
-            weights = ef.optimize()
+            # Optimize using max_sharpe directly
+            cleaned_weights = ef.max_sharpe(risk_free_rate=0.015)
             cleaned_weights = ef.clean_weights(cutoff=0.01)
             
             # Calculate portfolio metrics
@@ -508,7 +552,8 @@ class PortfolioOptimizer:
                 # Use Hierarchical Risk Parity as fallback
                 try:
                     hrp = HRPOpt(returns=filtered_returns)
-                    weights = hrp.optimize()
+                    # HRPOpt.optimize() requires a linkage_method parameter
+                    weights = hrp.optimize(linkage_method='single')
                     metrics = {
                         'expected_return': np.sum(filtered_returns.mean() * weights),
                         'volatility': np.sqrt(np.dot(weights.T, np.dot(reg_cov_matrix, weights))),
@@ -640,7 +685,9 @@ class PortfolioOptimizer:
                     # Attempt optimization with enhanced numerical stability
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
-                        ef.optimize()
+                        # The EfficientFrontier class doesn't have an 'optimize' method directly
+                        # Instead, we need to call a specific optimization method
+                        ef.min_volatility()
                         raw_weights = ef.clean_weights()
                         
                     # Validate optimization results
@@ -1533,7 +1580,8 @@ class PortfolioOptimizer:
                 # Use Hierarchical Risk Parity as fallback
                 try:
                     hrp = HRPOpt(returns=filtered_returns)
-                    weights = hrp.optimize()
+                    # HRPOpt.optimize() requires a linkage_method parameter
+                    weights = hrp.optimize(linkage_method='single')
                     metrics = {
                         'expected_return': np.sum(filtered_returns.mean() * weights),
                         'volatility': np.sqrt(np.dot(weights.T, np.dot(reg_cov_matrix, weights))),
@@ -1665,7 +1713,9 @@ class PortfolioOptimizer:
                     # Attempt optimization with enhanced numerical stability
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
-                        ef.optimize()
+                        # The EfficientFrontier class doesn't have an 'optimize' method directly
+                        # Instead, we need to call a specific optimization method
+                        ef.min_volatility()
                         raw_weights = ef.clean_weights()
                         
                     # Validate optimization results
