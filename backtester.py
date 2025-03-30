@@ -143,35 +143,50 @@ class Backtester:
                     if cash_weight > 0:
                         daily_return = daily_return * (1 - cash_weight) + cash_weight * cash_return
                     
-                    # Update weights due to price changes (drift)
+                    # Update weights due to price changes (drift) with enhanced validation
                     if portfolio_weights.sum() > 0:  # Only update if we have non-cash investments
-                        drifted_weights = portfolio_weights * (1 + returns_vector)
-                        drifted_sum = drifted_weights.sum()
-                        
-                        # Validate drifted weights
-                        if drifted_sum > 0 and not np.isnan(drifted_sum):
-                            drifted_weights = drifted_weights / drifted_sum * (1 - cash_weight)
-                        else:
-                            drifted_weights = portfolio_weights.copy()
-                            logging.warning(f"Weight drift calculation failed at index {i}. Maintaining previous weights.")
-                        
-                        # Check for rebalancing (monthly)
-                        days_since_last_rebalance = i - last_rebalance_index
-                        is_rebalancing_day = days_since_last_rebalance >= 21
-                        
-                        # Calculate transaction costs and update weights
-                        rebalancing_cost = 0.0
-                        if is_rebalancing_day:
-                            # Calculate turnover and costs
-                            turnover = (aligned_weights - drifted_weights).abs().sum()
-                            rebalancing_cost = transaction_cost * turnover
-                            cumulative_turnover += turnover
+                        try:
+                            # Calculate drifted weights with bounds checking
+                            returns_bounded = np.clip(returns_vector, -0.5, 0.5)  # Limit extreme movements
+                            drifted_weights = portfolio_weights * (1 + returns_bounded)
+                            drifted_sum = drifted_weights.sum()
                             
-                            # Update weights and tracking
-                            portfolio_weights = aligned_weights.copy()
-                            last_rebalance_index = i
-                        else:
-                            portfolio_weights = drifted_weights
+                            # Enhanced weight normalization with validation
+                            if drifted_sum > 0 and not np.isnan(drifted_sum):
+                                drifted_weights = drifted_weights / drifted_sum
+                                # Ensure weights stay within reasonable bounds
+                                max_weight = min(0.4, max(portfolio_weights) * 1.5)
+                                drifted_weights = np.minimum(drifted_weights, max_weight)
+                                # Renormalize after capping
+                                drifted_weights = drifted_weights / drifted_weights.sum() * (1 - cash_weight)
+                            else:
+                                logging.warning(f"Weight drift calculation failed at index {i}. Using previous weights.")
+                                drifted_weights = portfolio_weights.copy()
+                            
+                            # Check for rebalancing with dynamic threshold
+                            days_since_last_rebalance = i - last_rebalance_index
+                            max_drift = np.max(np.abs(drifted_weights - aligned_weights))
+                            is_rebalancing_day = (days_since_last_rebalance >= 21) or (max_drift > 0.1)
+                            
+                            # Enhanced transaction cost calculation
+                            rebalancing_cost = 0.0
+                            if is_rebalancing_day:
+                                # Calculate turnover with proper handling of cash positions
+                                active_positions = (drifted_weights > 0.001) | (aligned_weights > 0.001)
+                                turnover = np.where(active_positions,
+                                                   np.abs(aligned_weights - drifted_weights),
+                                                   0).sum()
+                                rebalancing_cost = transaction_cost * turnover
+                                cumulative_turnover += turnover
+                                
+                                # Update weights and tracking with validation
+                                portfolio_weights = aligned_weights.copy()
+                                last_rebalance_index = i
+                            else:
+                                portfolio_weights = drifted_weights
+                        except Exception as drift_error:
+                            logging.error(f"Error in weight drift calculation: {str(drift_error)}")
+                            portfolio_weights = portfolio_weights.copy()  # Maintain previous weights
                     
                     # Calculate portfolio value and returns
                     if i == 0:
