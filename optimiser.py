@@ -53,22 +53,23 @@ class PortfolioOptimizer:
         Returns:
             Tuple of (weights, metrics) dictionaries
         """
-        constraints = self._validate_constraints(constraints or {})
-        valid_symbols = valid_symbols or list(self.price_data.columns)
+        try:
+            constraints = self._validate_constraints(constraints or {})
+            valid_symbols = valid_symbols or list(self.price_data.columns)
 
-        # Validate symbols
-        invalid_symbols = set(valid_symbols) - set(self.price_data.columns)
-        if invalid_symbols:
-            raise ValueError(f"Invalid symbols provided: {invalid_symbols}")
+            # Validate symbols
+            invalid_symbols = set(valid_symbols) - set(self.price_data.columns)
+            if invalid_symbols:
+                raise ValueError(f"Invalid symbols provided: {invalid_symbols}")
 
-        filtered_price_data = self.price_data[valid_symbols]
-        filtered_returns = self.returns[valid_symbols]
+            filtered_price_data = self.price_data[valid_symbols]
+            filtered_returns = self.returns[valid_symbols]
 
-        # Ensure sector constraints are valid
-        constraints['max_sector'] = min(1.0, constraints.get('max_sector', 0.3))
+            # Ensure sector constraints are valid
+            constraints['max_sector'] = min(1.0, constraints.get('max_sector', 0.3))
 
-        # Covariance estimation with robust validation
-        reg_cov_matrix = self._estimate_covariance(filtered_price_data)
+            # Covariance estimation with robust validation
+            reg_cov_matrix = self._estimate_covariance(filtered_price_data)
 
     def _estimate_covariance(self, price_data: pd.DataFrame) -> np.ndarray:
         """Estimate the covariance matrix using Ledoit-Wolf shrinkage.
@@ -103,13 +104,48 @@ class PortfolioOptimizer:
             
         return reg_cov_matrix
 
-        # Set up and configure efficient frontier
-        ef = self._configure_efficient_frontier(
-            filtered_returns,
-            reg_cov_matrix,
-            constraints,
-            valid_symbols
-        )
+            # Set up and configure efficient frontier
+            ef = self._configure_efficient_frontier(
+                filtered_returns,
+                reg_cov_matrix,
+                constraints,
+                valid_symbols
+            )
+
+            # Optimize portfolio based on regime and risk appetite
+            if regime == 'Bearish':
+                weights = ef.min_volatility()
+            elif regime == 'Bullish':
+                weights = ef.max_sharpe()
+            else:  # Neutral
+                weights = ef.efficient_risk(target_volatility=0.15)
+
+            weights = ef.clean_weights(cutoff=constraints['min_position'])
+            perf = ef.portfolio_performance()
+            
+            metrics = {
+                'expected_return': float(perf[0]),
+                'volatility': float(perf[1]),
+                'sharpe_ratio': float(perf[2]),
+                'num_assets': len([w for w in weights.values() if w > constraints['min_position']]),
+                'total_weight': sum(weights.values())
+            }
+
+            return weights, metrics
+
+        except Exception as e:
+            logging.error(f"Portfolio optimization failed: {str(e)}")
+            total_assets = len(valid_symbols)
+            weights = {symbol: 1.0/total_assets for symbol in valid_symbols}
+            metrics = {
+                'expected_return': None,
+                'volatility': None,
+                'sharpe_ratio': None,
+                'num_assets': total_assets,
+                'total_weight': 1.0,
+                'warning': f'Using equal weight fallback due to: {str(e)}'
+            }
+            return weights, metrics
 
     def _configure_efficient_frontier(
         self,
@@ -150,38 +186,3 @@ class PortfolioOptimizer:
             )
             
         return ef
-
-        # Optimize portfolio based on regime and risk appetite
-        try:
-            if regime == 'Bearish':
-                weights = ef.min_volatility()
-            elif regime == 'Bullish':
-                weights = ef.max_sharpe()
-            else:  # Neutral
-                weights = ef.efficient_risk(target_volatility=0.15)
-
-            weights = ef.clean_weights(cutoff=constraints['min_position'])
-            perf = ef.portfolio_performance()
-            
-            metrics = {
-                'expected_return': float(perf[0]),
-                'volatility': float(perf[1]),
-                'sharpe_ratio': float(perf[2]),
-                'num_assets': len([w for w in weights.values() if w > constraints['min_position']]),
-                'total_weight': sum(weights.values())
-            }
-
-        except Exception as e:
-            logging.error(f"Portfolio optimization failed: {str(e)}")
-            total_assets = len(valid_symbols)
-            weights = {symbol: 1.0/total_assets for symbol in valid_symbols}
-            metrics = {
-                'expected_return': None,
-                'volatility': None,
-                'sharpe_ratio': None,
-                'num_assets': total_assets,
-                'total_weight': 1.0,
-                'warning': f'Using equal weight fallback due to: {str(e)}'
-            }
-
-        return weights, metrics
