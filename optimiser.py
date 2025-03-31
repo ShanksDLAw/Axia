@@ -42,17 +42,6 @@ class PortfolioOptimizer:
         return {**defaults, **constraints}
 
     def optimize(self, regime: str, risk_appetite: str, constraints: Optional[Dict] = None, valid_symbols: Optional[List[str]] = None) -> Tuple[Dict[str, float], Dict[str, float]]:
-        """Optimize portfolio weights using mean-variance optimization.
-
-        Args:
-            regime: Market regime ('Bullish', 'Bearish', 'Neutral')
-            risk_appetite: Risk appetite ('Conservative', 'Moderate', 'Aggressive')
-            constraints: Dictionary of portfolio constraints
-            valid_symbols: List of valid asset symbols to include
-
-        Returns:
-            Tuple of (weights, metrics) dictionaries
-        """
         try:
             constraints = self._validate_constraints(constraints or {})
             valid_symbols = valid_symbols or list(self.price_data.columns)
@@ -70,39 +59,6 @@ class PortfolioOptimizer:
 
             # Covariance estimation with robust validation
             reg_cov_matrix = self._estimate_covariance(filtered_price_data)
-
-    def _estimate_covariance(self, price_data: pd.DataFrame) -> np.ndarray:
-        """Estimate the covariance matrix using Ledoit-Wolf shrinkage.
-
-        Args:
-            price_data: DataFrame of asset prices
-
-        Returns:
-            Estimated covariance matrix with stability adjustments
-        """
-        try:
-            # Use Ledoit-Wolf shrinkage for base estimation
-            reg_cov_matrix = risk_models.CovarianceShrinkage(
-                price_data,
-                frequency=252
-            ).ledoit_wolf()
-            
-            # Validate matrix properties
-            if not np.all(np.isfinite(reg_cov_matrix)):
-                raise ValueError("Covariance matrix contains non-finite values")
-            if not np.all(np.linalg.eigvals(reg_cov_matrix) > 0):
-                raise ValueError("Covariance matrix is not positive definite")
-                
-            # Add minimal stability term
-            stability_factor = 1e-6
-            reg_cov_matrix += np.eye(reg_cov_matrix.shape[0]) * stability_factor
-            
-        except Exception as e:
-            logging.warning(f"Ledoit-Wolf estimation failed: {str(e)}. Using sample covariance.")
-            reg_cov_matrix = risk_models.sample_cov(price_data, frequency=252)
-            reg_cov_matrix += np.eye(reg_cov_matrix.shape[0]) * 1e-6
-            
-        return reg_cov_matrix
 
             # Set up and configure efficient frontier
             ef = self._configure_efficient_frontier(
@@ -146,6 +102,39 @@ class PortfolioOptimizer:
                 'warning': f'Using equal weight fallback due to: {str(e)}'
             }
             return weights, metrics
+
+    def _estimate_covariance(self, price_data: pd.DataFrame) -> np.ndarray:
+        """Estimate the covariance matrix using Ledoit-Wolf shrinkage.
+
+        Args:
+            price_data: DataFrame of asset prices
+
+        Returns:
+            Estimated covariance matrix with stability adjustments
+        """
+        try:
+            # Use Ledoit-Wolf shrinkage for base estimation
+            reg_cov_matrix = risk_models.CovarianceShrinkage(
+                price_data,
+                frequency=252
+            ).ledoit_wolf()
+            
+            # Validate matrix properties
+            if not np.all(np.isfinite(reg_cov_matrix)):
+                raise ValueError("Covariance matrix contains non-finite values")
+            if not np.all(np.linalg.eigvals(reg_cov_matrix) > 0):
+                raise ValueError("Covariance matrix is not positive definite")
+                
+            # Add minimal stability term
+            stability_factor = 1e-6
+            reg_cov_matrix += np.eye(reg_cov_matrix.shape[0]) * stability_factor
+            
+        except Exception as e:
+            logging.warning(f"Ledoit-Wolf estimation failed: {str(e)}. Using sample covariance.")
+            reg_cov_matrix = risk_models.sample_cov(price_data, frequency=252)
+            reg_cov_matrix += np.eye(reg_cov_matrix.shape[0]) * 1e-6
+            
+        return reg_cov_matrix
 
     def _configure_efficient_frontier(
         self,
