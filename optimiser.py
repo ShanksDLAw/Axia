@@ -91,16 +91,22 @@ class PortfolioOptimizer:
 
         except Exception as e:
             logging.error(f"Portfolio optimization failed: {str(e)}")
+            # Ensure valid_symbols is defined and not None
+            if valid_symbols is None:
+                valid_symbols = list(self.price_data.columns)
+                
+            # Create fallback equal-weight portfolio
             total_assets = len(valid_symbols)
             weights = {symbol: 1.0/total_assets for symbol in valid_symbols}
             metrics = {
-                'expected_return': None,
-                'volatility': None,
-                'sharpe_ratio': None,
+                'expected_return': 0.0,  # Use 0.0 instead of None to avoid type issues
+                'volatility': 0.0,       # Use 0.0 instead of None to avoid type issues
+                'sharpe_ratio': 0.0,     # Use 0.0 instead of None to avoid type issues
                 'num_assets': total_assets,
                 'total_weight': 1.0,
                 'warning': f'Using equal weight fallback due to: {str(e)}'
             }
+            # Always return a tuple of weights and metrics
             return weights, metrics
 
     def _estimate_covariance(self, price_data: pd.DataFrame) -> np.ndarray:
