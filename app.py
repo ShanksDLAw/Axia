@@ -72,7 +72,14 @@ if st.button("Run Analysis"):
     optimizer = PortfolioOptimizer(price_data, sectors)
     
     # Get risk appetite from user profile
-    risk_appetite = 'Conservative' if risk_level == 'Low' else ('Aggressive' if risk_level == 'High' else 'Moderate')
+    risk_appetite = 'Moderate'  # Default value
+    if risk_level:
+        if risk_level == 'Low':
+            risk_appetite = 'Conservative'
+        elif risk_level == 'High':
+            risk_appetite = 'Aggressive'
+        else:
+            risk_appetite = 'Moderate'
     
     # Set default constraints
     constraints = {

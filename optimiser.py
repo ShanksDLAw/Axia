@@ -143,9 +143,7 @@ class PortfolioOptimizer:
 
         except Exception as e:
             logging.error(f"Portfolio optimization failed: {str(e)}")
-            # Add warning to metrics
             fallback_metrics['warning'] = f'Using equal weight fallback due to: {str(e)}'
-            # Explicitly return a tuple to prevent TypeError when unpacking
             return fallback_weights, fallback_metrics
 
     def _estimate_covariance(self, price_data: pd.DataFrame) -> np.ndarray:
