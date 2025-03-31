@@ -741,7 +741,6 @@ class PortfolioOptimizer:
                     
                 except Exception as e:
                     logging.warning(f"Error assigning sector for {asset}: {str(e)}")
-                    continue
                     
                     # Ensure each sector has at least some assets
                     min_assets_per_sector = max(3, len(valid_symbols) // 10)
@@ -769,10 +768,9 @@ class PortfolioOptimizer:
                     
                     # Adjust constraints for better risk management
                     constraints['max_sector'] = min(constraints.get('max_sector', 0.3), 0.4)
-                    
-                except Exception as e:
-                    logging.error(f"Error creating risk-based sectors: {str(e)}")
-                    raise ValueError("Failed to create valid sector distribution")
+            except Exception as e:
+                logging.error(f"Error creating risk-based sectors: {str(e)}")
+                raise ValueError("Failed to create valid sector distribution")
             
             # Calculate sector metrics with enhanced risk appetite consideration and validation
             sector_vols = {}
@@ -810,7 +808,8 @@ class PortfolioOptimizer:
                         all_symbols = list(valid_symbols)
                         if len(all_symbols) == 0:
                             logging.error(f"No valid symbols available for {sector} assignment")
-                            # Create a dummy symbol to prevent errors
+                            # Skip this sector and continue with others
+                            logging.error(f"No valid symbols available for {sector} assignment")
                             continue
                             
                         # Different allocation strategies based on sector
@@ -1990,7 +1989,6 @@ class PortfolioOptimizer:
                     
                 except Exception as e:
                     logging.warning(f"Error assigning sector for {asset}: {str(e)}")
-                    continue
                     
                     # Ensure each sector has at least some assets
                     min_assets_per_sector = max(3, len(valid_symbols) // 10)
@@ -2018,10 +2016,9 @@ class PortfolioOptimizer:
                     
                     # Adjust constraints for better risk management
                     constraints['max_sector'] = min(constraints.get('max_sector', 0.3), 0.4)
-                    
-                except Exception as e:
-                    logging.error(f"Error creating risk-based sectors: {str(e)}")
-                    raise ValueError("Failed to create valid sector distribution")
+            except Exception as e:
+                logging.error(f"Error creating risk-based sectors: {str(e)}")
+                raise ValueError("Failed to create valid sector distribution")
             
             # Calculate sector metrics with enhanced risk appetite consideration and validation
             sector_vols = {}
@@ -2059,7 +2056,8 @@ class PortfolioOptimizer:
                         all_symbols = list(valid_symbols)
                         if len(all_symbols) == 0:
                             logging.error(f"No valid symbols available for {sector} assignment")
-                            # Create a dummy symbol to prevent errors
+                            # Skip this sector and continue with others
+                            logging.error(f"No valid symbols available for {sector} assignment")
                             continue
                             
                         # Different allocation strategies based on sector
