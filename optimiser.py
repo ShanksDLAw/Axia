@@ -117,61 +117,10 @@ class PortfolioOptimizer:
                         if cash_weight > 0:
                             scaled_weights['CASH'] = cash_weight
                         # Add sector constraints if available
-                    if sector_mappings:
-                        ef.add_sector_constraints(sector_lower, sector_upper, sector_mappings)
-                    
-                    # Optimize portfolio with maximum Sharpe ratio
-                    try:
-                        weights = ef.maximum_sharpe(risk_free_rate=0.02)
-                        cleaned_weights = ef.clean_weights()
-                    except Exception as opt_error:
-                        logging.warning(f"Maximum Sharpe optimization failed: {str(opt_error)}. Trying minimum volatility.")
-                        try:
-                            weights = ef.minimum_volatility()
-                            cleaned_weights = ef.clean_weights()
-                        except Exception as min_vol_error:
-                            logging.error(f"Minimum volatility optimization failed: {str(min_vol_error)}")
-                            raise
-                    
-                    # Calculate portfolio metrics
-                    metrics = {
-                        'expected_return': ef.portfolio_performance()[0],
-                        'volatility': ef.portfolio_performance()[1],
-                        'sharpe_ratio': ef.portfolio_performance()[2]
-                    }
-                    
-                    return cleaned_weights, metrics
-                    
                         # Update metrics
                         metrics['volatility_target'] = target_vol
                         metrics['actual_volatility'] = portfolio_vol
                         metrics['cash_allocation'] = cash_weight
-                        # Add sector constraints if available
-                    if sector_mappings:
-                        ef.add_sector_constraints(sector_lower, sector_upper, sector_mappings)
-                    
-                    # Optimize portfolio with maximum Sharpe ratio
-                    try:
-                        weights = ef.maximum_sharpe(risk_free_rate=0.02)
-                        cleaned_weights = ef.clean_weights()
-                    except Exception as opt_error:
-                        logging.warning(f"Maximum Sharpe optimization failed: {str(opt_error)}. Trying minimum volatility.")
-                        try:
-                            weights = ef.minimum_volatility()
-                            cleaned_weights = ef.clean_weights()
-                        except Exception as min_vol_error:
-                            logging.error(f"Minimum volatility optimization failed: {str(min_vol_error)}")
-                            raise
-                    
-                    # Calculate portfolio metrics
-                    metrics = {
-                        'expected_return': ef.portfolio_performance()[0],
-                        'volatility': ef.portfolio_performance()[1],
-                        'sharpe_ratio': ef.portfolio_performance()[2]
-                    }
-                    
-                    return cleaned_weights, metrics
-                    
                         return scaled_weights, metrics
                     else:
                         logging.warning("Portfolio volatility is zero. Skipping volatility targeting.")
