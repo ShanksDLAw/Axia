@@ -16,6 +16,11 @@ def create_portfolio_dashboard(weights_data: Dict[str, float], sector_weights: D
             
         if not isinstance(risk_metrics, dict):
             raise ValueError("Invalid risk metrics data provided")
+    except Exception as e:
+        logging.error(f"Error validating input data: {str(e)}")
+        weights_data = {}
+        sector_weights = {'Uncategorized': 1.0}
+        risk_metrics = {}
     
     # Normalize sector weights if they don't sum to 1
     total_sector_weight = sum(sector_weights.values())
