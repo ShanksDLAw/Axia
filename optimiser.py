@@ -67,9 +67,10 @@ class PortfolioOptimizer:
             'volatility': 0.0,
             'sharpe_ratio': 0.0,
             'num_assets': total_assets,
-            'total_weight': 1.0
+            'total_weight': 1.0,
+            'warning': ''  # Add warning field to fallback metrics
         }
-        
+
         # Validate regime parameter
         if regime not in ['Bullish', 'Bearish', 'Neutral']:
             logging.warning(f"Invalid regime '{regime}'. Using 'Neutral' as default.")
