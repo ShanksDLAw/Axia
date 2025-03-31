@@ -42,9 +42,36 @@ class PortfolioOptimizer:
         return {**defaults, **constraints}
 
     def optimize(self, regime: str, risk_appetite: str, constraints: Optional[Dict] = None, valid_symbols: Optional[List[str]] = None) -> Tuple[Dict[str, float], Dict[str, float]]:
+        """Optimize portfolio based on market regime and risk appetite.
+        
+        Args:
+            regime: Market regime ('Bullish', 'Bearish', or 'Neutral')
+            risk_appetite: Risk appetite ('Conservative', 'Moderate', or 'Aggressive')
+            constraints: Dictionary of portfolio constraints
+            valid_symbols: List of valid asset symbols to include in optimization
+            
+        Returns:
+            Tuple containing (weights, metrics) where:
+            - weights: Dictionary mapping asset symbols to their portfolio weights
+            - metrics: Dictionary of portfolio performance metrics
+        """
+        # Initialize default return values in case of exception
+        if valid_symbols is None:
+            valid_symbols = list(self.price_data.columns)
+            
+        # Default fallback portfolio (equal weight)
+        total_assets = len(valid_symbols)
+        fallback_weights = {symbol: 1.0/total_assets for symbol in valid_symbols}
+        fallback_metrics = {
+            'expected_return': 0.0,
+            'volatility': 0.0,
+            'sharpe_ratio': 0.0,
+            'num_assets': total_assets,
+            'total_weight': 1.0
+        }
+        
         try:
             constraints = self._validate_constraints(constraints or {})
-            valid_symbols = valid_symbols or list(self.price_data.columns)
 
             # Validate symbols
             invalid_symbols = set(valid_symbols) - set(self.price_data.columns)
@@ -91,23 +118,10 @@ class PortfolioOptimizer:
 
         except Exception as e:
             logging.error(f"Portfolio optimization failed: {str(e)}")
-            # Ensure valid_symbols is defined and not None
-            if valid_symbols is None:
-                valid_symbols = list(self.price_data.columns)
-                
-            # Create fallback equal-weight portfolio
-            total_assets = len(valid_symbols)
-            weights = {symbol: 1.0/total_assets for symbol in valid_symbols}
-            metrics = {
-                'expected_return': 0.0,  # Use 0.0 instead of None to avoid type issues
-                'volatility': 0.0,       # Use 0.0 instead of None to avoid type issues
-                'sharpe_ratio': 0.0,     # Use 0.0 instead of None to avoid type issues
-                'num_assets': total_assets,
-                'total_weight': 1.0,
-                'warning': f'Using equal weight fallback due to: {str(e)}'
-            }
-            # Always return a tuple of weights and metrics
-            return weights, metrics
+            # Add warning to metrics
+            fallback_metrics['warning'] = f'Using equal weight fallback due to: {str(e)}'
+            # Explicitly return a tuple without parentheses
+            return fallback_weights, fallback_metrics
 
     def _estimate_covariance(self, price_data: pd.DataFrame) -> np.ndarray:
         """Estimate the covariance matrix using Ledoit-Wolf shrinkage.
