@@ -82,7 +82,33 @@ if st.button("Run Analysis"):
     }
     
     # Call optimize with all required parameters
-    weights, portfolio_metrics = optimizer.optimize(regime, risk_appetite, constraints)
+    try:
+        weights, portfolio_metrics = optimizer.optimize(regime, risk_appetite, constraints)
+        if weights is None or portfolio_metrics is None:
+            # Fallback to equal weight if optimization fails
+            total_assets = len(price_data.columns)
+            weights = {symbol: 1.0/total_assets for symbol in price_data.columns}
+            portfolio_metrics = {
+                'expected_return': 0.0,
+                'volatility': 0.0,
+                'sharpe_ratio': 0.0,
+                'num_assets': total_assets,
+                'total_weight': 1.0,
+                'warning': 'Using equal weight fallback due to optimization failure'
+            }
+    except Exception as e:
+        # Fallback to equal weight if exception occurs
+        total_assets = len(price_data.columns)
+        weights = {symbol: 1.0/total_assets for symbol in price_data.columns}
+        portfolio_metrics = {
+            'expected_return': 0.0,
+            'volatility': 0.0,
+            'sharpe_ratio': 0.0,
+            'num_assets': total_assets,
+            'total_weight': 1.0,
+            'warning': f'Using equal weight fallback due to: {str(e)}'
+        }
+        
     progress_bar.progress(85)
     
     # Check if there's a warning in the portfolio metrics

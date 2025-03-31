@@ -70,13 +70,32 @@ class PortfolioOptimizer:
             'total_weight': 1.0
         }
         
+        # Validate regime parameter
+        if regime not in ['Bullish', 'Bearish', 'Neutral']:
+            logging.warning(f"Invalid regime '{regime}'. Using 'Neutral' as default.")
+            regime = 'Neutral'
+            
+        # Validate risk_appetite parameter
+        if risk_appetite not in ['Conservative', 'Moderate', 'Aggressive']:
+            logging.warning(f"Invalid risk_appetite '{risk_appetite}'. Using 'Moderate' as default.")
+            risk_appetite = 'Moderate'
+        
+        # Ensure constraints is a dictionary
+        if constraints is None:
+            constraints = {}
+        
         try:
-            constraints = self._validate_constraints(constraints or {})
+            constraints = self._validate_constraints(constraints)
 
             # Validate symbols
             invalid_symbols = set(valid_symbols) - set(self.price_data.columns)
             if invalid_symbols:
                 raise ValueError(f"Invalid symbols provided: {invalid_symbols}")
+                
+            # Ensure we have at least one valid symbol
+            if not valid_symbols or len(valid_symbols) == 0:
+                logging.warning("No valid symbols provided for optimization")
+                return fallback_weights, fallback_metrics
 
             filtered_price_data = self.price_data[valid_symbols]
             filtered_returns = self.returns[valid_symbols]
@@ -88,40 +107,45 @@ class PortfolioOptimizer:
             reg_cov_matrix = self._estimate_covariance(filtered_price_data)
 
             # Set up and configure efficient frontier
-            ef = self._configure_efficient_frontier(
-                filtered_returns,
-                reg_cov_matrix,
-                constraints,
-                valid_symbols
-            )
+            try:
+                ef = self._configure_efficient_frontier(
+                    filtered_returns,
+                    reg_cov_matrix,
+                    constraints,
+                    valid_symbols
+                )
 
-            # Optimize portfolio based on regime and risk appetite
-            if regime == 'Bearish':
-                weights = ef.min_volatility()
-            elif regime == 'Bullish':
-                weights = ef.max_sharpe()
-            else:  # Neutral
-                weights = ef.efficient_risk(target_volatility=0.15)
+                # Optimize portfolio based on regime and risk appetite
+                if regime == 'Bearish':
+                    weights = ef.min_volatility()
+                elif regime == 'Bullish':
+                    weights = ef.max_sharpe()
+                else:  # Neutral
+                    weights = ef.efficient_risk(target_volatility=0.15)
 
-            weights = ef.clean_weights(cutoff=constraints['min_position'])
-            perf = ef.portfolio_performance()
-            
-            metrics = {
-                'expected_return': float(perf[0]),
-                'volatility': float(perf[1]),
-                'sharpe_ratio': float(perf[2]),
-                'num_assets': len([w for w in weights.values() if w > constraints['min_position']]),
-                'total_weight': sum(weights.values())
-            }
+                weights = ef.clean_weights(cutoff=constraints['min_position'])
+                perf = ef.portfolio_performance()
+                
+                metrics = {
+                    'expected_return': float(perf[0]),
+                    'volatility': float(perf[1]),
+                    'sharpe_ratio': float(perf[2]),
+                    'num_assets': len([w for w in weights.values() if w > constraints['min_position']]),
+                    'total_weight': sum(weights.values())
+                }
 
-            return weights, metrics
+                return weights, metrics
+            except Exception as e:
+                logging.error(f"Efficient frontier optimization failed: {str(e)}")
+                fallback_metrics['warning'] = f'Using equal weight fallback due to: {str(e)}'
+                return fallback_weights, fallback_metrics
 
         except Exception as e:
             logging.error(f"Portfolio optimization failed: {str(e)}")
             # Add warning to metrics
             fallback_metrics['warning'] = f'Using equal weight fallback due to: {str(e)}'
             # Explicitly return a tuple to prevent TypeError when unpacking
-            return (fallback_weights, fallback_metrics)
+            return fallback_weights, fallback_metrics
 
     def _estimate_covariance(self, price_data: pd.DataFrame) -> np.ndarray:
         """Estimate the covariance matrix using Ledoit-Wolf shrinkage.
@@ -133,6 +157,23 @@ class PortfolioOptimizer:
             Estimated covariance matrix with stability adjustments
         """
         try:
+            # Validate input data first
+            if price_data.empty:
+                raise ValueError("Empty price data provided")
+                
+            if price_data.shape[1] < 2:
+                # Special case: only one asset
+                variance = price_data.pct_change().var().iloc[0] * 252
+                return np.array([[variance]])
+                
+            # Check for sufficient data points
+            min_history = 60  # Require at least 60 data points for reliable estimation
+            if price_data.shape[0] < min_history:
+                logging.warning(f"Insufficient price history: {price_data.shape[0]} < {min_history} days")
+                # Fall back to sample covariance with stability factor
+                sample_cov = risk_models.sample_cov(price_data, frequency=252)
+                return sample_cov + np.eye(sample_cov.shape[0]) * 1e-5
+            
             # Use Ledoit-Wolf shrinkage for base estimation
             reg_cov_matrix = risk_models.CovarianceShrinkage(
                 price_data,
@@ -142,8 +183,18 @@ class PortfolioOptimizer:
             # Validate matrix properties
             if not np.all(np.isfinite(reg_cov_matrix)):
                 raise ValueError("Covariance matrix contains non-finite values")
-            if not np.all(np.linalg.eigvals(reg_cov_matrix) > 0):
-                raise ValueError("Covariance matrix is not positive definite")
+                
+            # Check positive definiteness
+            try:
+                if not np.all(np.linalg.eigvals(reg_cov_matrix) > 0):
+                    logging.warning("Covariance matrix is not positive definite, applying correction")
+                    # Add minimal stability term
+                    stability_factor = 1e-5
+                    reg_cov_matrix += np.eye(reg_cov_matrix.shape[0]) * stability_factor
+            except np.linalg.LinAlgError:
+                logging.warning("Eigenvalue computation failed, applying stronger correction")
+                stability_factor = 1e-4
+                reg_cov_matrix += np.eye(reg_cov_matrix.shape[0]) * stability_factor
                 
             # Add minimal stability term
             stability_factor = 1e-6
@@ -151,8 +202,16 @@ class PortfolioOptimizer:
             
         except Exception as e:
             logging.warning(f"Ledoit-Wolf estimation failed: {str(e)}. Using sample covariance.")
-            reg_cov_matrix = risk_models.sample_cov(price_data, frequency=252)
-            reg_cov_matrix += np.eye(reg_cov_matrix.shape[0]) * 1e-6
+            try:
+                reg_cov_matrix = risk_models.sample_cov(price_data, frequency=252)
+                reg_cov_matrix += np.eye(reg_cov_matrix.shape[0]) * 1e-5
+            except Exception as inner_e:
+                logging.error(f"Sample covariance estimation also failed: {str(inner_e)}")
+                # Last resort: create a diagonal matrix with reasonable volatility estimates
+                n_assets = price_data.shape[1]
+                vols = price_data.pct_change().std().fillna(0.01) * np.sqrt(252)
+                vols = np.clip(vols, 0.05, 0.5)  # Reasonable volatility bounds
+                reg_cov_matrix = np.diag(vols**2)
             
         return reg_cov_matrix
 
@@ -174,24 +233,28 @@ class PortfolioOptimizer:
         Returns:
             Configured EfficientFrontier object
         """
-        ef = EfficientFrontier(
-            returns,
-            cov_matrix,
-            weight_bounds=(constraints['min_position'], constraints['max_position'])
-        )
-
-        # Add L2 regularization to reduce extreme weights
-        ef.add_objective(objective_functions.L2_reg, gamma=0.5)
-
-        # Add sector constraints if defined
-        if self.sectors:
-            sector_mapper = {asset: self.sectors.get(asset, 'Other') for asset in valid_symbols}
-            sector_bounds = {sector: (0.0, constraints['max_sector']) 
-                           for sector in set(sector_mapper.values())}
-            ef.add_sector_constraints(
-                sector_mapper, 
-                sector_lower={s: v[0] for s, v in sector_bounds.items()},
-                sector_upper={s: v[1] for s, v in sector_bounds.items()}
+        try:
+            ef = EfficientFrontier(
+                returns,
+                cov_matrix,
+                weight_bounds=(constraints['min_position'], constraints['max_position'])
             )
-            
-        return ef
+
+            # Add L2 regularization to reduce extreme weights
+            ef.add_objective(objective_functions.L2_reg, gamma=0.5)
+
+            # Add sector constraints if defined
+            if self.sectors:
+                sector_mapper = {asset: self.sectors.get(asset, 'Other') for asset in valid_symbols}
+                sector_bounds = {sector: (0.0, constraints['max_sector']) 
+                               for sector in set(sector_mapper.values())}
+                ef.add_sector_constraints(
+                    sector_mapper, 
+                    sector_lower={s: v[0] for s, v in sector_bounds.items()},
+                    sector_upper={s: v[1] for s, v in sector_bounds.items()}
+                )
+                
+            return ef
+        except Exception as e:
+            logging.error(f"Error configuring efficient frontier: {str(e)}")
+            raise
