@@ -1,12 +1,21 @@
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
+import numpy as np
 from plotly.subplots import make_subplots
+from typing import Dict, Any
 
-def create_portfolio_dashboard(weights_data, sector_weights, risk_metrics):
+def create_portfolio_dashboard(weights_data: Dict[str, float], sector_weights: Dict[str, float], risk_metrics: Dict[str, Any]) -> go.Figure:
     # Validate and clean input data
-    if not isinstance(sector_weights, dict) or not sector_weights:
-        sector_weights = {'Uncategorized': 1.0}
+    try:
+        if not isinstance(weights_data, dict) or not weights_data:
+            raise ValueError("Invalid weights data provided")
+            
+        if not isinstance(sector_weights, dict) or not sector_weights:
+            sector_weights = {'Uncategorized': 1.0}
+            
+        if not isinstance(risk_metrics, dict):
+            raise ValueError("Invalid risk metrics data provided")
     
     # Normalize sector weights if they don't sum to 1
     total_sector_weight = sum(sector_weights.values())

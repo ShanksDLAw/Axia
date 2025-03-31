@@ -62,13 +62,19 @@ class PortfolioOptimizer:
         # Default fallback portfolio (equal weight)
         total_assets = len(valid_symbols)
         fallback_weights = {symbol: 1.0/total_assets for symbol in valid_symbols}
+        
+        # Calculate basic metrics for fallback portfolio
+        returns = self.returns[valid_symbols].mean() * 252  # Annualized returns
+        volatility = np.sqrt(np.diagonal(self._estimate_covariance(self.price_data[valid_symbols])))
+        sharpe = returns / volatility if volatility.any() != 0 else np.zeros_like(returns)
+        
         fallback_metrics = {
-            'expected_return': 0.0,
-            'volatility': 0.0,
-            'sharpe_ratio': 0.0,
+            'expected_return': float(np.mean(returns)),
+            'volatility': float(np.mean(volatility)),
+            'sharpe_ratio': float(np.mean(sharpe)),
             'num_assets': total_assets,
             'total_weight': 1.0,
-            'warning': ''  # Add warning field to fallback metrics
+            'warning': ''
         }
 
         # Validate regime parameter
@@ -116,13 +122,25 @@ class PortfolioOptimizer:
                     valid_symbols
                 )
 
+                # Map risk appetite to optimization parameters
+                risk_targets = {
+                    'Conservative': {'target_volatility': 0.10, 'risk_aversion': 2.0},
+                    'Moderate': {'target_volatility': 0.15, 'risk_aversion': 1.0},
+                    'Aggressive': {'target_volatility': 0.20, 'risk_aversion': 0.5}
+                }
+                
+                risk_params = risk_targets.get(risk_appetite, risk_targets['Moderate'])
+                
                 # Optimize portfolio based on regime and risk appetite
                 if regime == 'Bearish':
                     weights = ef.min_volatility()
                 elif regime == 'Bullish':
-                    weights = ef.max_sharpe()
+                    weights = ef.max_sharpe(risk_free_rate=0.02)  # Assuming 2% risk-free rate
                 else:  # Neutral
-                    weights = ef.efficient_risk(target_volatility=0.15)
+                    weights = ef.efficient_risk(
+                        target_volatility=risk_params['target_volatility'],
+                        risk_free_rate=0.02
+                    )
 
                 weights = ef.clean_weights(cutoff=constraints['min_position'])
                 perf = ef.portfolio_performance()
