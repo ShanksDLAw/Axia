@@ -73,7 +73,16 @@ if st.button("Run Analysis"):
     
     # Get risk appetite from user profile
     risk_appetite = 'Conservative' if risk_level == 'Low' else ('Aggressive' if risk_level == 'High' else 'Moderate')
-    weights, portfolio_metrics = optimizer.optimize(regime, risk_appetite)
+    
+    # Set default constraints
+    constraints = {
+        'max_position': 0.1,
+        'max_sector': 0.3,
+        'min_position': 0.01
+    }
+    
+    # Call optimize with all required parameters
+    weights, portfolio_metrics = optimizer.optimize(regime, risk_appetite, constraints)
     progress_bar.progress(85)
     
     # Check if there's a warning in the portfolio metrics
