@@ -41,12 +41,12 @@ class PortfolioOptimizer:
         }
         return {**defaults, **constraints}
 
-    def optimize_portfolio(self, 
-                         constraints: Optional[Dict] = None, 
-                         valid_symbols: Optional[List[str]] = None) -> Tuple[Dict[str, float], Dict[str, float]]:
+    def optimize(self, regime: str, risk_appetite: str, constraints: Optional[Dict] = None, valid_symbols: Optional[List[str]] = None) -> Tuple[Dict[str, float], Dict[str, float]]:
         """Optimize portfolio weights using mean-variance optimization.
 
         Args:
+            regime: Market regime ('Bullish', 'Bearish', 'Neutral')
+            risk_appetite: Risk appetite ('Conservative', 'Moderate', 'Aggressive')
             constraints: Dictionary of portfolio constraints
             valid_symbols: List of valid asset symbols to include
 
@@ -151,17 +151,17 @@ class PortfolioOptimizer:
             
         return ef
 
-        # Optimize portfolio
+        # Optimize portfolio based on regime and risk appetite
         try:
-            ef.min_volatility()
+            if regime == 'Bearish':
+                weights = ef.min_volatility()
+            elif regime == 'Bullish':
+                weights = ef.max_sharpe()
+            else:  # Neutral
+                weights = ef.efficient_risk(target_volatility=0.15)
+
             weights = ef.clean_weights(cutoff=constraints['min_position'])
             perf = ef.portfolio_performance()
-            
-            # Validate optimization results
-            if not weights:
-                raise ValueError("Optimization resulted in empty weights")
-            if not all(isinstance(w, (int, float)) for w in weights.values()):
-                raise ValueError("Invalid weight values in optimization result")
             
             metrics = {
                 'expected_return': float(perf[0]),
@@ -170,20 +170,11 @@ class PortfolioOptimizer:
                 'num_assets': len([w for w in weights.values() if w > constraints['min_position']]),
                 'total_weight': sum(weights.values())
             }
-            
-            # Validate metrics
-            if not all(isinstance(v, (int, float)) for v in metrics.values()):
-                raise ValueError("Invalid metric values in optimization result")
-            if not np.isclose(metrics['total_weight'], 1.0, rtol=1e-3):
-                raise ValueError(f"Total portfolio weight {metrics['total_weight']} deviates significantly from 1.0")
-                
+
         except Exception as e:
             logging.error(f"Portfolio optimization failed: {str(e)}")
-            # Fallback to equal weights with proper normalization
             total_assets = len(valid_symbols)
-            weight = 1.0 / total_assets
-            weights = {symbol: weight for symbol in valid_symbols}
-            
+            weights = {symbol: 1.0/total_assets for symbol in valid_symbols}
             metrics = {
                 'expected_return': None,
                 'volatility': None,
