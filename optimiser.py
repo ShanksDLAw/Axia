@@ -337,9 +337,27 @@ class PortfolioOptimizer:
             Configured EfficientFrontier object
         """
         try:
+            # Ensure returns is a pandas Series with proper index
+            if not isinstance(returns, pd.Series):
+                # If returns is a DataFrame, convert to Series of mean returns
+                if isinstance(returns, pd.DataFrame):
+                    returns = returns.mean() * 252  # Annualize returns
+                # If returns is a numpy array or other type, convert to Series
+                elif isinstance(returns, (np.ndarray, list)):
+                    returns = pd.Series(returns, index=valid_symbols)
+                else:
+                    logging.warning(f"Unexpected returns type: {type(returns)}. Creating default returns.")
+                    returns = pd.Series([0.05] * len(valid_symbols), index=valid_symbols)  # Default 5% return
+            
+            # Validate returns has the right shape
+            if len(returns) != len(valid_symbols):
+                logging.warning(f"Returns length mismatch: {len(returns)} vs {len(valid_symbols)}. Creating default returns.")
+                returns = pd.Series([0.05] * len(valid_symbols), index=valid_symbols)  # Default 5% return
+                
+            # Create EfficientFrontier instance with validated inputs
             ef = EfficientFrontier(
-                returns,
-                cov_matrix,
+                expected_returns=returns,
+                cov_matrix=cov_matrix,
                 weight_bounds=(constraints['min_position'], constraints['max_position'])
             )
 

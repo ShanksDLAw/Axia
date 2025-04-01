@@ -173,6 +173,9 @@ if st.button("Run Analysis"):
         # Create and display interactive portfolio dashboard
         st.subheader("📊 Portfolio Analysis Dashboard")
         
+        # Import numpy here to ensure it's available
+        import numpy as np
+        
         # Validate sector allocation data before visualization
         sector_allocation_data = results.get('Sector Allocation', {})
         if not sector_allocation_data or not isinstance(sector_allocation_data, dict):
@@ -192,16 +195,34 @@ if st.button("Run Analysis"):
         # If no valid sectors remain, use a default
         if not validated_sectors:
             validated_sectors = {'Uncategorized': 1.0}
+        
+        # Validate weights data
+        validated_weights = {}
+        for symbol, weight in weights.items():
+            try:
+                weight_val = float(weight)
+                if not np.isnan(weight_val) and weight_val > 0:
+                    validated_weights[symbol] = weight_val
+            except (ValueError, TypeError):
+                continue
+                
+        # If no valid weights remain, use a default
+        if not validated_weights:
+            validated_weights = {'Default': 1.0}
+            st.warning("No valid weight data available. Using default weights.")
+            
+        # Validate risk metrics
+        validated_risk_metrics = {
+            'sharpe_ratio': float(results.get('Sharpe Ratio', 0.0)),
+            'total_return': float(results.get('Total Return', 0.0)),
+            'max_drawdown': float(results.get('Max Drawdown', 0.0)),
+            'volatility': float(portfolio_metrics.get('volatility', 0.0))
+        }
             
         dashboard = create_portfolio_dashboard(
-            weights_data=weights,
+            weights_data=validated_weights,
             sector_weights=validated_sectors,
-            risk_metrics={
-                'sharpe_ratio': results['Sharpe Ratio'],
-                'total_return': results['Total Return'],
-                'max_drawdown': results['Max Drawdown'],
-                'volatility': portfolio_metrics.get('volatility', 0.0)
-            },
+            risk_metrics=validated_risk_metrics,
             sectors_map=sectors
         )
         st.plotly_chart(dashboard, use_container_width=True, theme="streamlit")

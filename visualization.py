@@ -23,15 +23,27 @@ def create_portfolio_dashboard(weights_data: Dict[str, float], sector_weights: D
         sector_weights = {'Uncategorized': 1.0}
         risk_metrics = {}
     
-    # Normalize sector weights if they don't sum to 1
+    # Normalize sector weights if they don't sum to 1 with improved validation
     try:
-        total_sector_weight = sum(sector_weights.values())
-        if not np.isclose(total_sector_weight, 1.0, rtol=1e-3):
-            if total_sector_weight > 0:
-                sector_weights = {k: v/total_sector_weight for k, v in sector_weights.items()}
+        # First filter out invalid values
+        valid_sector_weights = {}
+        for sector, weight in sector_weights.items():
+            if isinstance(weight, (int, float)) and not np.isnan(weight) and weight > 0:
+                valid_sector_weights[sector] = float(weight)
             else:
-                logging.warning("Total sector weight is zero or negative. Using default sector allocation.")
-                sector_weights = {'Uncategorized': 1.0}
+                logging.warning(f"Skipping invalid sector weight for {sector}: {weight}")
+        
+        # If no valid weights, use default
+        if not valid_sector_weights:
+            logging.warning("No valid sector weights found. Using default sector allocation.")
+            sector_weights = {'Uncategorized': 1.0}
+        else:
+            # Normalize the valid weights
+            total_sector_weight = sum(valid_sector_weights.values())
+            if not np.isclose(total_sector_weight, 1.0, rtol=1e-3) and total_sector_weight > 0:
+                sector_weights = {k: v/total_sector_weight for k, v in valid_sector_weights.items()}
+            else:
+                sector_weights = valid_sector_weights
     except Exception as e:
         logging.error(f"Error normalizing sector weights: {str(e)}")
         sector_weights = {'Uncategorized': 1.0}
