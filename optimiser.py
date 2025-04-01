@@ -295,7 +295,6 @@ class PortfolioOptimizer:
                                     weights = ef.min_volatility()
                                 except Exception as e3:
                                     logging.error(f"All optimization methods failed for Bullish regime: {str(e3)}. Will use fallback weights.")
-                                    # Immediately return fallback weights instead of continuing
                                     return fallback_weights, {**fallback_metrics, 'warning': f'Bullish optimization failed: {str(e3)}. Using equal weight portfolio.'}
                                 
                 elif regime == 'Neutral':
