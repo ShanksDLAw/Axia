@@ -220,33 +220,124 @@ class PortfolioOptimizer:
                 # Optimize portfolio based on regime and risk appetite with improved error handling
                 try:
                     if regime == 'Bearish':
-                        weights = ef.min_volatility()
-                    elif regime == 'Bullish':
-                        # Try max_sharpe with different solvers if needed
                         try:
-                            weights = ef.max_sharpe(risk_free_rate=0.02)  # Assuming 2% risk-free rate
+                            weights = ef.min_volatility()
+                        except Exception as vol_error:
+                            logging.warning(f"Min volatility optimization failed: {str(vol_error)}. Trying with more relaxed constraints.")
+                            # Try with more relaxed constraints
+                            relaxed_constraints = constraints.copy()
+                            relaxed_constraints['min_position'] = 0.0  # Allow zero positions
+                            ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, relaxed_constraints, valid_symbols)
+                            weights = ef.min_volatility()
+                    elif regime == 'Bullish':
+                        # Try max_sharpe with improved error handling and no solver parameter
+                        try:
+                            weights = ef.max_sharpe(risk_free_rate=0.02)
                         except Exception as sharpe_error:
-                            logging.warning(f"Max Sharpe optimization failed: {str(sharpe_error)}. Trying with different solver.")
-                            # Reset the efficient frontier with a different solver
+                            logging.warning(f"Max Sharpe optimization failed: {str(sharpe_error)}. Trying alternative approach.")
+                            try:
+                                # First try: Maximize Sharpe with relaxed constraints
+                                relaxed_constraints = constraints.copy()
+                                relaxed_constraints['min_position'] = 0.0
+                                relaxed_constraints['max_position'] = min(1.0, constraints['max_position'] * 1.2)
+                                ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, relaxed_constraints, valid_symbols)
+                                weights = ef.max_sharpe(risk_free_rate=0.02)
+                            except Exception as e1:
+                                logging.warning(f"Relaxed max_sharpe failed: {str(e1)}. Trying efficient return.")
+                                try:
+                                    # Second try: Use efficient_return with dynamic target
+                                    target_return = max(0.05, filtered_returns.mean().mean() * 252)
+                                    weights = ef.efficient_return(target_return=target_return)
+                                except Exception as e2:
+                                    logging.warning(f"Efficient return failed: {str(e2)}. Using min volatility.")
+                                    weights = ef.min_volatility()
+                    
+                    # Clean weights with improved precision
+                    weights = ef.clean_weights(cutoff=0.0001)
+                    # Try different approaches in sequence
+                    try:
+                        # First try: Reset with more relaxed constraints
+                        relaxed_constraints = constraints.copy()
+                        relaxed_constraints['min_position'] = max(0.0, constraints['min_position'] - 0.005)
+                        relaxed_constraints['max_position'] = min(1.0, constraints['max_position'] + 0.05)
+                        ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, relaxed_constraints, valid_symbols)
+                        weights = ef.max_sharpe(risk_free_rate=0.02)
+                    except Exception as e1:
+                        logging.warning(f"Relaxed constraints approach failed: {str(e1)}. Trying efficient return.")
+                        try:
+                            # Second try: Use efficient_return instead
                             ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, constraints, valid_symbols)
-                            ef.max_sharpe(risk_free_rate=0.02, solver='ECOS')
-                            weights = ef.clean_weights()
+                            # Target a reasonable return
+                            target_return = filtered_returns.mean().mean() * 252 * 1.2  # 20% higher than average
+                            target_return = max(0.05, min(0.25, target_return))  # Keep within reasonable bounds
+                            weights = ef.efficient_return(target_return=target_return, market_neutral=False)
+                        except Exception as e2:
+                            logging.warning(f"Efficient return approach failed: {str(e2)}. Trying min volatility.")
+                            # Last try: Fall back to min_volatility
+                            ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, constraints, valid_symbols)
+                            weights = ef.min_volatility()
+                        
+                        weights = ef.clean_weights(cutoff=0.0005)
                     else:  # Neutral
-                        # Try efficient_risk with fallback to min_volatility
+                        # Try efficient_risk with multiple fallback options
                         try:
                             weights = ef.efficient_risk(
                                 target_volatility=risk_params['target_volatility'],
                                 risk_free_rate=0.02
                             )
                         except Exception as risk_error:
-                            logging.warning(f"Efficient risk optimization failed: {str(risk_error)}. Falling back to min_volatility.")
-                            # Reset the efficient frontier
-                            ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, constraints, valid_symbols)
-                            weights = ef.min_volatility()
+                            logging.warning(f"Efficient risk optimization failed: {str(risk_error)}. Trying alternative approaches.")
+                            try:
+                                # First fallback: Try with relaxed constraints
+                                relaxed_constraints = constraints.copy()
+                                relaxed_constraints['min_position'] = 0.0  # Allow zero positions
+                                relaxed_constraints['max_position'] = min(1.0, constraints['max_position'] + 0.1)  # Increase max position
+                                ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, relaxed_constraints, valid_symbols)
+                                weights = ef.efficient_risk(
+                                    target_volatility=risk_params['target_volatility'] * 1.2,  # Allow 20% higher volatility
+                                    risk_free_rate=0.02
+                                )
+                            except Exception as e1:
+                                logging.warning(f"Relaxed efficient_risk failed: {str(e1)}. Trying min_volatility.")
+                                try:
+                                    # Second fallback: Try min_volatility
+                                    ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, constraints, valid_symbols)
+                                    weights = ef.min_volatility()
+                                except Exception as e2:
+                                    logging.warning(f"Min volatility also failed: {str(e2)}. Using HRP as final fallback.")
+                                    # Final fallback: Use hierarchical risk parity (HRP) which is more robust
+                                    try:
+                                        from pypfopt import hierarchical_portfolio as hp
+                                        hrp = hp.HRPOpt(filtered_returns, cov_matrix=reg_cov_matrix)
+                                        weights = hrp.optimize()
+                                    except Exception as e3:
+                                        logging.error(f"All optimization methods failed: {str(e3)}. Using equal weight fallback.")
+                                        return fallback_weights, {**fallback_metrics, 'warning': 'All optimization methods failed'}
+
                             
                     # Apply a more lenient cutoff to avoid infeasible solutions
-                    weights = ef.clean_weights(cutoff=max(0.001, constraints['min_position'] * 0.5))
-                    perf = ef.portfolio_performance()
+                    weights = ef.clean_weights(cutoff=max(0.0005, constraints['min_position'] * 0.25))
+                    
+                    # Ensure weights sum to 1.0 (sometimes clean_weights can result in sum < 1)
+                    weight_sum = sum(weights.values())
+                    if abs(weight_sum - 1.0) > 1e-5:  # If weights don't sum to approximately 1
+                        logging.info(f"Adjusting weights to sum to 1.0 (current sum: {weight_sum})")
+                        # Normalize weights to sum to 1
+                        weights = {k: v/weight_sum for k, v in weights.items()}
+                    
+                    # Get performance metrics with robust error handling
+                    try:
+                        perf = ef.portfolio_performance(risk_free_rate=0.02)
+                    except Exception as perf_error:
+                        logging.warning(f"Error calculating portfolio performance: {str(perf_error)}")
+                        # Calculate performance manually
+                        expected_return = sum(weights[asset] * returns[asset] for asset in weights)
+                        portfolio_vol = np.sqrt(
+                            sum(weights[i] * weights[j] * cov_matrix[list(valid_symbols).index(i)][list(valid_symbols).index(j)]
+                                for i in weights for j in weights)
+                        )
+                        sharpe = (expected_return - 0.02) / portfolio_vol if portfolio_vol > 0 else 0
+                        perf = (expected_return, portfolio_vol, sharpe)
                     
                 except Exception as opt_error:
                     logging.error(f"All optimization methods failed: {str(opt_error)}. Using equal weight fallback.")
@@ -404,10 +495,17 @@ class PortfolioOptimizer:
             min_position = max(0.0, constraints['min_position'] - 0.001)  # Slightly relax lower bound
             max_position = min(1.0, constraints['max_position'] + 0.01)  # Slightly relax upper bound
             
+            # Set solver options for better convergence
+            solver_options = {
+                'max_iters': 1000,  # Increase max iterations
+                'tol': 1e-6        # Slightly relax tolerance
+            }
+            
             ef = EfficientFrontier(
                 expected_returns=returns,
                 cov_matrix=cov_matrix,
-                weight_bounds=(min_position, max_position)
+                weight_bounds=(min_position, max_position),
+                verbose=False
             )
 
             # Add L2 regularization with reduced gamma to avoid over-constraining

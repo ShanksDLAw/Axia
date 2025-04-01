@@ -25,25 +25,30 @@ def create_portfolio_dashboard(weights_data: Dict[str, float], sector_weights: D
     
     # Normalize sector weights if they don't sum to 1 with improved validation
     try:
-        # First filter out invalid values
+        # First filter out invalid values and handle NaN/zero weights
         valid_sector_weights = {}
         for sector, weight in sector_weights.items():
             if isinstance(weight, (int, float)) and not np.isnan(weight) and weight > 0:
                 valid_sector_weights[sector] = float(weight)
             else:
-                logging.warning(f"Skipping invalid sector weight for {sector}: {weight}")
+                logging.warning(f"Invalid or zero sector weight for {sector}: {weight}")
         
-        # If no valid weights, use default
+        # If no valid weights, use default with warning
         if not valid_sector_weights:
-            logging.warning("No valid sector weights found. Using default sector allocation.")
+            logging.warning("No valid sector weights found. Using default equal sector allocation.")
             sector_weights = {'Uncategorized': 1.0}
         else:
-            # Normalize the valid weights
+            # Normalize the valid weights with better precision handling
             total_sector_weight = sum(valid_sector_weights.values())
-            if not np.isclose(total_sector_weight, 1.0, rtol=1e-3) and total_sector_weight > 0:
-                sector_weights = {k: v/total_sector_weight for k, v in valid_sector_weights.items()}
+            if total_sector_weight > 0:
+                if not np.isclose(total_sector_weight, 1.0, rtol=1e-5, atol=1e-8):
+                    sector_weights = {k: v/total_sector_weight for k, v in valid_sector_weights.items()}
+                    logging.info(f"Normalized sector weights from sum {total_sector_weight:.6f} to 1.0")
+                else:
+                    sector_weights = valid_sector_weights
             else:
-                sector_weights = valid_sector_weights
+                logging.warning("Total sector weight is zero or negative. Using default allocation.")
+                sector_weights = {'Uncategorized': 1.0}
     except Exception as e:
         logging.error(f"Error normalizing sector weights: {str(e)}")
         sector_weights = {'Uncategorized': 1.0}
