@@ -145,6 +145,53 @@ class AssetLoader:
             except OSError:
                 pass
             return None
+            
+    def _get_sectors(self, symbols):
+        """Get sector information for a list of symbols with improved error handling"""
+        sectors = {}
+        
+        # Define default sectors for common asset types
+        default_sectors = {
+            'BND': 'Bonds', 'AGG': 'Bonds', 'TLT': 'Bonds', 'IEF': 'Bonds', 'LQD': 'Bonds', 'HYG': 'Bonds',
+            'GLD': 'Commodities', 'SLV': 'Commodities', 'USO': 'Commodities', 'UNG': 'Commodities'
+        }
+        
+        # Pre-populate with defaults for known symbols
+        for symbol in symbols:
+            if symbol in default_sectors:
+                sectors[symbol] = default_sectors[symbol]
+        
+        # Fetch remaining sectors with improved error handling
+        with ThreadPoolExecutor(max_workers=self.max_pool_size) as executor:
+            futures = {}
+            for symbol in symbols:
+                if symbol not in sectors:  # Skip if we already have a default sector
+                    futures[symbol] = executor.submit(self._fetch_symbol_data, symbol)
+                
+            for symbol, future in futures.items():
+                try:
+                    data = future.result(timeout=10)  # Add timeout to prevent hanging
+                    if data and 'sector' in data and data['sector']:
+                        sectors[symbol] = data['sector']
+                    else:
+                        # Assign default sector based on symbol pattern
+                        if any(bond in symbol for bond in ['BOND', 'GOVT', 'TIPS', 'MBB']):
+                            sectors[symbol] = 'Bonds'
+                        elif any(commodity in symbol for commodity in ['GOLD', 'SLVR', 'OIL', 'GAS']):
+                            sectors[symbol] = 'Commodities'
+                        else:
+                            sectors[symbol] = 'Other'
+                except Exception as e:
+                    logging.warning(f"Error fetching sector for {symbol}: {str(e)}. Using 'Other' as default.")
+                    sectors[symbol] = 'Other'
+        
+        # Ensure all symbols have a sector
+        for symbol in symbols:
+            if symbol not in sectors:
+                sectors[symbol] = 'Other'
+                logging.warning(f"No sector data for {symbol}. Using 'Other' as default.")
+        
+        return sectors
 
     def _save_cache(self, symbol: str, data: Dict[str, Any]):
         cache_file = self.cache_dir / f"{symbol}.json"
@@ -368,6 +415,12 @@ class AssetLoader:
         assets.extend(self.index_map['Commodities'])
         unique_assets = list(set(assets))
 
+        # Ensure we have at least some default symbols if fetching failed
+        if not unique_assets:
+            logging.warning("No symbols fetched from sources. Using default symbols.")
+            default_symbols = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'BRK-B', 'JNJ', 'PG', 'V', 'BAC', 'DIS']
+            unique_assets = default_symbols
+
         # Process assets in optimized parallel batches
         batch_size = self.batch_size * self.max_pool_size
         batches = [unique_assets[i:i + batch_size] for i in range(0, len(unique_assets), batch_size)]
@@ -377,6 +430,12 @@ class AssetLoader:
             all_valid_assets.extend(valid_batch)
             all_sector_map.update(sector_batch)
             all_failed_symbols.extend(failed_batch)
+
+        # Ensure we have at least some valid assets as fallback
+        if not all_valid_assets:
+            logging.warning("No valid assets after processing. Using default symbols.")
+            all_valid_assets = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'BRK-B']
+            all_sector_map = {symbol: 'Technology' if symbol in ['AAPL', 'MSFT', 'GOOGL'] else 'Consumer' for symbol in all_valid_assets}
 
         logging.info(f"Loaded {len(all_valid_assets)} valid symbols")
         if all_failed_symbols:

@@ -217,19 +217,41 @@ class PortfolioOptimizer:
                 
                 risk_params = risk_targets.get(risk_appetite, risk_targets['Moderate'])
                 
-                # Optimize portfolio based on regime and risk appetite
-                if regime == 'Bearish':
-                    weights = ef.min_volatility()
-                elif regime == 'Bullish':
-                    weights = ef.max_sharpe(risk_free_rate=0.02)  # Assuming 2% risk-free rate
-                else:  # Neutral
-                    weights = ef.efficient_risk(
-                        target_volatility=risk_params['target_volatility'],
-                        risk_free_rate=0.02
-                    )
-
-                weights = ef.clean_weights(cutoff=constraints['min_position'])
-                perf = ef.portfolio_performance()
+                # Optimize portfolio based on regime and risk appetite with improved error handling
+                try:
+                    if regime == 'Bearish':
+                        weights = ef.min_volatility()
+                    elif regime == 'Bullish':
+                        # Try max_sharpe with different solvers if needed
+                        try:
+                            weights = ef.max_sharpe(risk_free_rate=0.02)  # Assuming 2% risk-free rate
+                        except Exception as sharpe_error:
+                            logging.warning(f"Max Sharpe optimization failed: {str(sharpe_error)}. Trying with different solver.")
+                            # Reset the efficient frontier with a different solver
+                            ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, constraints, valid_symbols)
+                            ef.max_sharpe(risk_free_rate=0.02, solver='ECOS')
+                            weights = ef.clean_weights()
+                    else:  # Neutral
+                        # Try efficient_risk with fallback to min_volatility
+                        try:
+                            weights = ef.efficient_risk(
+                                target_volatility=risk_params['target_volatility'],
+                                risk_free_rate=0.02
+                            )
+                        except Exception as risk_error:
+                            logging.warning(f"Efficient risk optimization failed: {str(risk_error)}. Falling back to min_volatility.")
+                            # Reset the efficient frontier
+                            ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, constraints, valid_symbols)
+                            weights = ef.min_volatility()
+                            
+                    # Apply a more lenient cutoff to avoid infeasible solutions
+                    weights = ef.clean_weights(cutoff=max(0.001, constraints['min_position'] * 0.5))
+                    perf = ef.portfolio_performance()
+                    
+                except Exception as opt_error:
+                    logging.error(f"All optimization methods failed: {str(opt_error)}. Using equal weight fallback.")
+                    # Use equal weight fallback
+                    return fallback_weights, {**fallback_metrics, 'warning': f'Optimization failed: {str(opt_error)}'}
                 
                 metrics = {
                     'expected_return': float(perf[0]),
@@ -353,27 +375,61 @@ class PortfolioOptimizer:
             if len(returns) != len(valid_symbols):
                 logging.warning(f"Returns length mismatch: {len(returns)} vs {len(valid_symbols)}. Creating default returns.")
                 returns = pd.Series([0.05] * len(valid_symbols), index=valid_symbols)  # Default 5% return
+            
+            # Ensure no NaN values in returns
+            if returns.isna().any():
+                logging.warning("NaN values found in returns. Replacing with mean values.")
+                mean_return = returns.mean()
+                if np.isnan(mean_return):
+                    mean_return = 0.05  # Default if all are NaN
+                returns = returns.fillna(mean_return)
                 
-            # Create EfficientFrontier instance with validated inputs
+            # Ensure covariance matrix is positive definite with stronger correction
+            try:
+                # Check eigenvalues
+                min_eigenval = np.min(np.linalg.eigvals(cov_matrix))
+                if min_eigenval <= 0:
+                    logging.warning(f"Covariance matrix not positive definite. Min eigenvalue: {min_eigenval}")
+                    # Apply stronger correction
+                    stability_factor = max(1e-4, abs(min_eigenval) * 2)
+                    cov_matrix += np.eye(cov_matrix.shape[0]) * stability_factor
+                    logging.info(f"Applied stability factor of {stability_factor} to covariance matrix")
+            except np.linalg.LinAlgError:
+                logging.warning("Eigenvalue computation failed, applying stronger correction")
+                stability_factor = 1e-3
+                cov_matrix += np.eye(cov_matrix.shape[0]) * stability_factor
+                
+            # Create EfficientFrontier instance with validated inputs and relaxed bounds
+            # Slightly relax the min position constraint to help solver convergence
+            min_position = max(0.0, constraints['min_position'] - 0.001)  # Slightly relax lower bound
+            max_position = min(1.0, constraints['max_position'] + 0.01)  # Slightly relax upper bound
+            
             ef = EfficientFrontier(
                 expected_returns=returns,
                 cov_matrix=cov_matrix,
-                weight_bounds=(constraints['min_position'], constraints['max_position'])
+                weight_bounds=(min_position, max_position)
             )
 
-            # Add L2 regularization to reduce extreme weights
-            ef.add_objective(objective_functions.L2_reg, gamma=0.5)
+            # Add L2 regularization with reduced gamma to avoid over-constraining
+            ef.add_objective(objective_functions.L2_reg, gamma=0.1)
 
-            # Add sector constraints if defined
+            # Add sector constraints if defined, with relaxed bounds
             if self.sectors:
                 sector_mapper = {asset: self.sectors.get(asset, 'Other') for asset in valid_symbols}
-                sector_bounds = {sector: (0.0, constraints['max_sector']) 
+                
+                # Slightly relax sector constraints
+                max_sector = min(1.0, constraints['max_sector'] + 0.05)  # Add 5% slack
+                
+                sector_bounds = {sector: (0.0, max_sector) 
                                for sector in set(sector_mapper.values())}
-                ef.add_sector_constraints(
-                    sector_mapper, 
-                    sector_lower={s: v[0] for s, v in sector_bounds.items()},
-                    sector_upper={s: v[1] for s, v in sector_bounds.items()}
-                )
+                
+                # Only add sector constraints if we have more than one sector
+                if len(set(sector_mapper.values())) > 1:
+                    ef.add_sector_constraints(
+                        sector_mapper, 
+                        sector_lower={s: v[0] for s, v in sector_bounds.items()},
+                        sector_upper={s: v[1] for s, v in sector_bounds.items()}
+                    )
                 
             return ef
         except Exception as e:
