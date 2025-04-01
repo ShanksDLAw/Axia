@@ -254,33 +254,63 @@ class PortfolioOptimizer:
                     
                     # Clean weights with improved precision
                     weights = ef.clean_weights(cutoff=0.0001)
-                    # Try different approaches in sequence
+                    # Try different approaches in sequence with improved solver configuration
                     try:
-                        # First try: Reset with more relaxed constraints
+                        # First try: Reset with more relaxed constraints and improved solver settings
                         relaxed_constraints = constraints.copy()
                         relaxed_constraints['min_position'] = max(0.0, constraints['min_position'] - 0.005)
                         relaxed_constraints['max_position'] = min(1.0, constraints['max_position'] + 0.05)
                         ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, relaxed_constraints, valid_symbols)
+                        
+                        # Configure solver for better numerical stability
+                        ef.solver = 'ECOS'
+                        ef.solver_options = {
+                            'max_iters': 1000,
+                            'abstol': 1e-8,
+                            'reltol': 1e-8,
+                            'feastol': 1e-8
+                        }
+                        
                         weights = ef.max_sharpe(risk_free_rate=0.02)
                     except Exception as e1:
                         logging.warning(f"Relaxed constraints approach failed: {str(e1)}. Trying efficient return.")
                         try:
-                            # Second try: Use efficient_return instead
+                            # Second try: Use efficient_return with improved solver settings
                             ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, constraints, valid_symbols)
-                            # Target a reasonable return
-                            target_return = filtered_returns.mean().mean() * 252 * 1.2  # 20% higher than average
-                            target_return = max(0.05, min(0.25, target_return))  # Keep within reasonable bounds
+                            ef.solver = 'SCS'
+                            ef.solver_options = {
+                                'max_iters': 2500,
+                                'eps': 1e-5,
+                                'normalize': True
+                            }
+                            
+                            # Target a reasonable return with more conservative bounds
+                            target_return = filtered_returns.mean().mean() * 252 * 1.1  # 10% higher than average
+                            target_return = max(0.03, min(0.20, target_return))  # More conservative bounds
                             weights = ef.efficient_return(target_return=target_return, market_neutral=False)
                         except Exception as e2:
-                            logging.warning(f"Efficient return approach failed: {str(e2)}. Trying min volatility.")
-                            # Last try: Fall back to min_volatility
+                            logging.warning(f"Efficient return approach failed: {str(e2)}. Using robust min volatility.")
+                            # Last try: Fall back to min_volatility with most stable solver
                             ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, constraints, valid_symbols)
+                            ef.solver = 'OSQP'
+                            ef.solver_options = {
+                                'max_iter': 5000,
+                                'eps_abs': 1e-8,
+                                'eps_rel': 1e-8
+                            }
                             weights = ef.min_volatility()
                         
-                        weights = ef.clean_weights(cutoff=0.0005)
+                        weights = ef.clean_weights(cutoff=0.001)  # Slightly higher cutoff for more stability
                     else:  # Neutral
-                        # Try efficient_risk with multiple fallback options
+                        # Try efficient_risk with multiple fallback options and improved solver settings
                         try:
+                            ef.solver = 'ECOS'
+                            ef.solver_options = {
+                                'max_iters': 1000,
+                                'abstol': 1e-8,
+                                'reltol': 1e-8,
+                                'feastol': 1e-8
+                            }
                             weights = ef.efficient_risk(
                                 target_volatility=risk_params['target_volatility'],
                                 risk_free_rate=0.02
@@ -288,20 +318,35 @@ class PortfolioOptimizer:
                         except Exception as risk_error:
                             logging.warning(f"Efficient risk optimization failed: {str(risk_error)}. Trying alternative approaches.")
                             try:
-                                # First fallback: Try with relaxed constraints
+                                # First fallback: Try with relaxed constraints and SCS solver
                                 relaxed_constraints = constraints.copy()
                                 relaxed_constraints['min_position'] = 0.0  # Allow zero positions
                                 relaxed_constraints['max_position'] = min(1.0, constraints['max_position'] + 0.1)  # Increase max position
                                 ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, relaxed_constraints, valid_symbols)
+                                ef.solver = 'SCS'
+                                ef.solver_options = {
+                                    'max_iters': 2500,
+                                    'eps': 1e-5,
+                                    'normalize': True,
+                                    'acceleration_lookback': 20
+                                }
                                 weights = ef.efficient_risk(
-                                    target_volatility=risk_params['target_volatility'] * 1.2,  # Allow 20% higher volatility
+                                    target_volatility=risk_params['target_volatility'] * 1.1,  # Allow 10% higher volatility
                                     risk_free_rate=0.02
                                 )
                             except Exception as e1:
                                 logging.warning(f"Relaxed efficient_risk failed: {str(e1)}. Trying min_volatility.")
                                 try:
-                                    # Second fallback: Try min_volatility
+                                    # Second fallback: Try min_volatility with OSQP solver
                                     ef = self._configure_efficient_frontier(filtered_returns, reg_cov_matrix, constraints, valid_symbols)
+                                    ef.solver = 'OSQP'
+                                    ef.solver_options = {
+                                        'max_iter': 5000,
+                                        'eps_abs': 1e-8,
+                                        'eps_rel': 1e-8,
+                                        'polish': True,
+                                        'adaptive_rho': True
+                                    }
                                     weights = ef.min_volatility()
                                 except Exception as e2:
                                     logging.warning(f"Min volatility also failed: {str(e2)}. Using HRP as final fallback.")
@@ -313,6 +358,9 @@ class PortfolioOptimizer:
                                     except Exception as e3:
                                         logging.error(f"All optimization methods failed: {str(e3)}. Using equal weight fallback.")
                                         return fallback_weights, {**fallback_metrics, 'warning': 'All optimization methods failed'}
+                            
+                        # Clean weights with higher cutoff for stability
+                        weights = ef.clean_weights(cutoff=0.001)
 
                             
                     # Apply a more lenient cutoff to avoid infeasible solutions
