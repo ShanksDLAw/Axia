@@ -63,19 +63,105 @@ class PortfolioOptimizer:
         total_assets = len(valid_symbols)
         fallback_weights = {symbol: 1.0/total_assets for symbol in valid_symbols}
         
-        # Calculate basic metrics for fallback portfolio
-        returns = self.returns[valid_symbols].mean() * 252  # Annualized returns
-        volatility = np.sqrt(np.diagonal(self._estimate_covariance(self.price_data[valid_symbols])))
-        sharpe = returns / volatility if volatility.any() != 0 else np.zeros_like(returns)
-        
-        fallback_metrics = {
-            'expected_return': float(np.mean(returns)),
-            'volatility': float(np.mean(volatility)),
-            'sharpe_ratio': float(np.mean(sharpe)),
-            'num_assets': total_assets,
-            'total_weight': 1.0,
-            'warning': ''
-        }
+        # Calculate basic metrics for fallback portfolio with robust error handling
+        try:
+            # Ensure valid_symbols is a list and contains valid columns
+            valid_cols = [col for col in valid_symbols if col in self.returns.columns]
+            
+            if not valid_cols:
+                # No valid columns, use safe defaults
+                fallback_metrics = {
+                    'expected_return': 0.0,
+                    'volatility': 0.1,  # Default 10% volatility
+                    'sharpe_ratio': 0.0,
+                    'num_assets': total_assets,
+                    'total_weight': 1.0,
+                    'warning': 'No valid assets for return calculation'
+                }
+            else:
+                # Calculate returns safely
+                try:
+                    # Properly calculate annualized returns as a Series
+                    returns_data = self.returns[valid_cols].mean() * 252  # Annualized returns
+                    
+                    # Ensure returns is a pandas Series
+                    if not isinstance(returns_data, pd.Series):
+                        if isinstance(returns_data, (float, int, np.number)):
+                            # Single value case
+                            returns_data = pd.Series([returns_data] * len(valid_cols), index=valid_cols)
+                        elif isinstance(returns_data, np.ndarray):
+                            # Array case
+                            returns_data = pd.Series(returns_data, index=valid_cols)
+                        else:
+                            # Fallback for unexpected types
+                            logging.warning(f"Unexpected returns_data type: {type(returns_data)}")
+                            returns_data = pd.Series([0.05] * len(valid_cols), index=valid_cols)  # 5% default return
+                except Exception as e:
+                    logging.warning(f"Error calculating returns: {str(e)}. Using default values.")
+                    returns_data = pd.Series([0.05] * len(valid_cols), index=valid_cols)  # 5% default return
+                
+                # Calculate covariance matrix safely
+                try:
+                    cov_matrix = self._estimate_covariance(self.price_data[valid_cols])
+                    volatility = np.sqrt(np.diagonal(cov_matrix))
+                    
+                    # Ensure volatility is a numpy array or pandas Series
+                    if not isinstance(volatility, (np.ndarray, pd.Series)):
+                        volatility = np.array([volatility] * len(valid_cols))
+                        
+                    # Replace any invalid values
+                    volatility = np.nan_to_num(volatility, nan=0.15, posinf=0.15, neginf=0.15)
+                except Exception as e:
+                    logging.warning(f"Covariance estimation failed: {str(e)}. Using default volatility.")
+                    volatility = np.array([0.15] * len(valid_cols))  # Default 15% volatility
+                
+                # Calculate Sharpe ratio safely
+                try:
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        # Ensure returns_data and volatility have the same length
+                        if isinstance(returns_data, pd.Series) and len(returns_data) != len(volatility):
+                            logging.warning(f"Length mismatch: returns_data ({len(returns_data)}) vs volatility ({len(volatility)})")
+                            # Adjust lengths to match
+                            min_len = min(len(returns_data), len(volatility))
+                            returns_data = returns_data.iloc[:min_len] if len(returns_data) > min_len else returns_data
+                            volatility = volatility[:min_len] if len(volatility) > min_len else volatility
+                            
+                        sharpe = np.divide(returns_data, volatility)
+                        sharpe = np.nan_to_num(sharpe, nan=0.0, posinf=0.0, neginf=0.0)
+                except Exception as e:
+                    logging.warning(f"Sharpe ratio calculation failed: {str(e)}. Using default values.")
+                    sharpe = np.array([0.0] * len(valid_cols))
+                
+                # Convert to float values for serialization with robust error handling
+                try:
+                    expected_return = float(np.nanmean(returns_data))
+                    avg_volatility = float(np.nanmean(volatility))
+                    avg_sharpe = float(np.nanmean(sharpe))
+                except Exception as e:
+                    logging.warning(f"Error converting metrics to float: {str(e)}. Using defaults.")
+                    expected_return = 0.05  # 5% default return
+                    avg_volatility = 0.15   # 15% default volatility
+                    avg_sharpe = expected_return / avg_volatility if avg_volatility > 0 else 0.0
+                
+                fallback_metrics = {
+                    'expected_return': expected_return,
+                    'volatility': avg_volatility,
+                    'sharpe_ratio': avg_sharpe,
+                    'num_assets': total_assets,
+                    'total_weight': 1.0,
+                    'warning': 'Using equal weight fallback portfolio'
+                }
+        except Exception as e:
+            logging.error(f"Error calculating fallback metrics: {str(e)}")
+            # Use safe default values
+            fallback_metrics = {
+                'expected_return': 0.0,
+                'volatility': 0.1,
+                'sharpe_ratio': 0.0,
+                'num_assets': total_assets,
+                'total_weight': 1.0,
+                'warning': f'Metrics calculation failed: {str(e)}'
+            }
 
         # Validate regime parameter
         if regime not in ['Bullish', 'Bearish', 'Neutral']:

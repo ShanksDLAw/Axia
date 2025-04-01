@@ -172,15 +172,37 @@ if st.button("Run Analysis"):
         
         # Create and display interactive portfolio dashboard
         st.subheader("📊 Portfolio Analysis Dashboard")
+        
+        # Validate sector allocation data before visualization
+        sector_allocation_data = results.get('Sector Allocation', {})
+        if not sector_allocation_data or not isinstance(sector_allocation_data, dict):
+            sector_allocation_data = {'Uncategorized': 1.0}
+            st.warning("No valid sector allocation data available. Using default categorization.")
+            
+        # Ensure all sector weights are valid numbers
+        validated_sectors = {}
+        for sector, weight in sector_allocation_data.items():
+            try:
+                weight_val = float(weight)
+                if not np.isnan(weight_val) and weight_val > 0:
+                    validated_sectors[sector] = weight_val
+            except (ValueError, TypeError):
+                continue
+                
+        # If no valid sectors remain, use a default
+        if not validated_sectors:
+            validated_sectors = {'Uncategorized': 1.0}
+            
         dashboard = create_portfolio_dashboard(
             weights_data=weights,
-            sector_weights=results.get('Sector Allocation', {}),
+            sector_weights=validated_sectors,
             risk_metrics={
                 'sharpe_ratio': results['Sharpe Ratio'],
                 'total_return': results['Total Return'],
                 'max_drawdown': results['Max Drawdown'],
                 'volatility': portfolio_metrics.get('volatility', 0.0)
-            }
+            },
+            sectors_map=sectors
         )
         st.plotly_chart(dashboard, use_container_width=True, theme="streamlit")
         

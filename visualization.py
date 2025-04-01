@@ -2,10 +2,11 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 import numpy as np
+import logging
 from plotly.subplots import make_subplots
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional, Union
 
-def create_portfolio_dashboard(weights_data: Dict[str, float], sector_weights: Dict[str, float], risk_metrics: Dict[str, Any]) -> go.Figure:
+def create_portfolio_dashboard(weights_data: Dict[str, float], sector_weights: Dict[str, float], risk_metrics: Dict[str, Any], sectors_map: Optional[Dict[str, str]] = None) -> go.Figure:
     # Validate and clean input data
     try:
         if not isinstance(weights_data, dict) or not weights_data:
@@ -23,9 +24,17 @@ def create_portfolio_dashboard(weights_data: Dict[str, float], sector_weights: D
         risk_metrics = {}
     
     # Normalize sector weights if they don't sum to 1
-    total_sector_weight = sum(sector_weights.values())
-    if not np.isclose(total_sector_weight, 1.0, rtol=1e-3):
-        sector_weights = {k: v/total_sector_weight for k, v in sector_weights.items()}
+    try:
+        total_sector_weight = sum(sector_weights.values())
+        if not np.isclose(total_sector_weight, 1.0, rtol=1e-3):
+            if total_sector_weight > 0:
+                sector_weights = {k: v/total_sector_weight for k, v in sector_weights.items()}
+            else:
+                logging.warning("Total sector weight is zero or negative. Using default sector allocation.")
+                sector_weights = {'Uncategorized': 1.0}
+    except Exception as e:
+        logging.error(f"Error normalizing sector weights: {str(e)}")
+        sector_weights = {'Uncategorized': 1.0}
     
     # Create figure with optimized layout for medium risk profile
     fig = make_subplots(
@@ -37,59 +46,110 @@ def create_portfolio_dashboard(weights_data: Dict[str, float], sector_weights: D
         horizontal_spacing=0.1
     )
     
-    # 1. Sector Allocation (Pie Chart)
-    sector_df = pd.DataFrame(list(sector_weights.items()), columns=['Sector', 'Weight'])
+    # 1. Sector Allocation (Pie Chart) with improved validation
+    # Filter out invalid sectors and weights
+    valid_sectors = {}
+    for sector, weight in sector_weights.items():
+        if not isinstance(weight, (int, float)) or np.isnan(weight) or weight <= 0:
+            continue
+        valid_sectors[sector] = weight
+            
+    # Create dataframe from valid sectors
+    sector_df = pd.DataFrame(list(valid_sectors.items()), columns=['Sector', 'Weight'])
     sector_df = sector_df[sector_df['Sector'] != 'Unknown']
-    fig.add_trace(
-        go.Pie(
-            labels=sector_df['Sector'], 
-            values=sector_df['Weight'], 
-            hole=0.4,
-            textinfo='label+percent',
-            marker=dict(colors=px.colors.qualitative.Plotly)
-        ),
-        row=1, col=1
-    )
+    if not sector_df.empty:
+        fig.add_trace(
+            go.Pie(
+                labels=sector_df['Sector'], 
+                values=sector_df['Weight'], 
+                hole=0.4,
+                textinfo='label+percent',
+                marker=dict(colors=px.colors.qualitative.Plotly)
+            ),
+            row=1, col=1
+        )
+    else:
+        # Add a placeholder if no sectors
+        fig.add_trace(
+            go.Pie(
+                labels=['No Sector Data'], 
+                values=[1], 
+                hole=0.4,
+                textinfo='label',
+                marker=dict(colors=['gray'])
+            ),
+            row=1, col=1
+        )
     
     # 2. Top 10 Holdings (Bar Chart)
-    holdings_df = pd.DataFrame(list(weights_data.items()), columns=['Asset', 'Weight'])
-    holdings_df = holdings_df.sort_values('Weight', ascending=False).head(10)
-    holdings_df['Weight_Percent'] = holdings_df['Weight'] * 100  # Convert to percentage for display
-    
-    fig.add_trace(
-        go.Bar(
-            x=holdings_df['Weight_Percent'],
-            y=holdings_df['Asset'],
-            orientation='h',
-            text=holdings_df['Weight_Percent'].apply(lambda x: f'{x:.2f}%'),
-            textposition='auto',
-            marker=dict(color=px.colors.sequential.Blues_r)
-        ),
-        row=1, col=2
-    )
+    if weights_data:
+        holdings_df = pd.DataFrame(list(weights_data.items()), columns=['Asset', 'Weight'])
+        holdings_df = holdings_df.sort_values('Weight', ascending=False).head(10)
+        holdings_df['Weight_Percent'] = holdings_df['Weight'] * 100  # Convert to percentage for display
+        
+        fig.add_trace(
+            go.Bar(
+                x=holdings_df['Weight_Percent'],
+                y=holdings_df['Asset'],
+                orientation='h',
+                text=holdings_df['Weight_Percent'].apply(lambda x: f'{x:.2f}%'),
+                textposition='auto',
+                marker=dict(color=px.colors.sequential.Blues_r)
+            ),
+            row=1, col=2
+        )
+    else:
+        # Add placeholder if no holdings data
+        fig.add_annotation(
+            x=0.75, y=0.75,
+            text="No holdings data available",
+            showarrow=False,
+            font=dict(size=14),
+            xref="paper", yref="paper"
+        )
     
     # 3. Asset Allocation Treemap
-    # Create proper treemap data structure
+    # Create proper treemap data structure with improved sector mapping
     treemap_data = []
     
-    # First add sectors as root nodes
-    for sector in sector_weights:
+    # First add sectors as root nodes with validation
+    valid_sectors = {}
+    for sector, weight in sector_weights.items():
+        if not isinstance(weight, (int, float)) or np.isnan(weight) or weight <= 0:
+            continue
+        valid_sectors[sector] = weight
         treemap_data.append({
             'id': sector,
             'parent': '',
-            'value': sector_weights[sector]
+            'value': weight
         })
     
-    # Then add assets as children of sectors
+    # Handle case with no valid sectors
+    if not valid_sectors:
+        valid_sectors = {'Uncategorized': 1.0}
+        treemap_data.append({
+            'id': 'Uncategorized',
+            'parent': '',
+            'value': 1.0
+        })
+    
+    # Then add assets as children of sectors with improved mapping
     for asset, weight in weights_data.items():
-        # Use the sector from the sector_weights keys
-        # This is a simplified approach that assigns all assets to the first sector
-        # In a real implementation, we would need access to the sectors dictionary
-        if len(sector_weights) > 0:
-            asset_sector = list(sector_weights.keys())[0]
-        else:
-            asset_sector = 'Unknown'
+        # Skip invalid weights
+        if not isinstance(weight, (int, float)) or np.isnan(weight) or weight <= 0:
+            continue
+            
+        # Determine the sector for this asset with better fallback handling
+        asset_sector = 'Uncategorized'
         
+        # Try to get sector from sectors_map if provided
+        if sectors_map and asset in sectors_map:
+            mapped_sector = sectors_map[asset]
+            # Only use the mapped sector if it exists in our valid sectors
+            if mapped_sector in valid_sectors:
+                asset_sector = mapped_sector
+        
+        # Add the asset to the treemap
         treemap_data.append({
             'id': asset,
             'parent': asset_sector,
@@ -98,23 +158,43 @@ def create_portfolio_dashboard(weights_data: Dict[str, float], sector_weights: D
     
     treemap_df = pd.DataFrame(treemap_data)
     
-    fig.add_trace(
-        go.Treemap(
-            ids=treemap_df['id'],
-            parents=treemap_df['parent'],
-            values=treemap_df['value'],
-            branchvalues='total',
-            textinfo='label+value+percent root',
-            marker=dict(colorscale=px.colors.sequential.Viridis)
-        ),
-        row=2, col=1
-    )
+    if not treemap_df.empty:
+        fig.add_trace(
+            go.Treemap(
+                ids=treemap_df['id'],
+                parents=treemap_df['parent'],
+                values=treemap_df['value'],
+                branchvalues='total',
+                textinfo='label+value+percent root',
+                marker=dict(colorscale=px.colors.sequential.Viridis)
+            ),
+            row=2, col=1
+        )
     
     # 4. Risk Metrics Indicators with improved visualization
+    # Safely get risk metrics with proper defaults
+    sharpe_ratio = risk_metrics.get('sharpe_ratio', 0)
+    expected_return = risk_metrics.get('expected_return', 0)
+    volatility = risk_metrics.get('volatility', 0)
+    max_drawdown = risk_metrics.get('max_drawdown', 0)
+    
+    # Ensure numeric values
+    try:
+        sharpe_ratio = float(sharpe_ratio)
+        expected_return = float(expected_return)
+        volatility = float(volatility)
+        max_drawdown = float(max_drawdown)
+    except (ValueError, TypeError):
+        logging.warning("Non-numeric risk metrics detected, using defaults")
+        sharpe_ratio = 0.0
+        expected_return = 0.0
+        volatility = 0.0
+        max_drawdown = 0.0
+    
     fig.add_trace(
         go.Indicator(
             mode="number+gauge+delta",
-            value=risk_metrics.get('sharpe_ratio', 0),
+            value=sharpe_ratio,
             title={'text': "Sharpe Ratio"},
             gauge={
                 'axis': {'range': [None, 3]},
@@ -135,10 +215,17 @@ def create_portfolio_dashboard(weights_data: Dict[str, float], sector_weights: D
         row=2, col=2
     )
     
+    # Format percentage values safely
+    def format_percentage(value):
+        try:
+            return f"{float(value):.2%}"
+        except (ValueError, TypeError):
+            return "0.00%"
+    
     # Add additional risk metrics as annotations
     fig.add_annotation(
         x=0.875, y=0.3,
-        text=f"Expected Return: {risk_metrics.get('expected_return', 0):.2%}",
+        text=f"Expected Return: {format_percentage(expected_return)}",
         showarrow=False,
         font=dict(size=14),
         xref="paper", yref="paper"
@@ -146,7 +233,7 @@ def create_portfolio_dashboard(weights_data: Dict[str, float], sector_weights: D
     
     fig.add_annotation(
         x=0.875, y=0.2,
-        text=f"Volatility: {risk_metrics.get('volatility', 0):.2%}",
+        text=f"Volatility: {format_percentage(volatility)}",
         showarrow=False,
         font=dict(size=14),
         xref="paper", yref="paper"
@@ -154,7 +241,7 @@ def create_portfolio_dashboard(weights_data: Dict[str, float], sector_weights: D
     
     fig.add_annotation(
         x=0.875, y=0.1,
-        text=f"Max Drawdown: {risk_metrics.get('max_drawdown', 0):.2%}",
+        text=f"Max Drawdown: {format_percentage(max_drawdown)}",
         showarrow=False,
         font=dict(size=14),
         xref="paper", yref="paper"
