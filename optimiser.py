@@ -236,7 +236,8 @@ class PortfolioOptimizer:
                             weights = ef.min_volatility()
                         except Exception as e:
                             logging.error(f"Relaxed min volatility also failed: {str(e)}. Will use fallback weights.")
-                            weights = None  # Explicitly set weights to None to trigger fallback
+                            # Immediately return fallback weights instead of continuing
+                            return fallback_weights, {**fallback_metrics, 'warning': f'Bearish optimization failed: {str(e)}. Using equal weight portfolio.'}
                         
                 elif regime == 'Bullish':
                     try:
@@ -294,7 +295,8 @@ class PortfolioOptimizer:
                                     weights = ef.min_volatility()
                                 except Exception as e3:
                                     logging.error(f"All optimization methods failed for Bullish regime: {str(e3)}. Will use fallback weights.")
-                                    weights = None  # Explicitly set weights to None to trigger fallback
+                                    # Immediately return fallback weights instead of continuing
+                                    return fallback_weights, {**fallback_metrics, 'warning': f'Bullish optimization failed: {str(e3)}. Using equal weight portfolio.'}
                                 
                 elif regime == 'Neutral':
                     # For neutral regime, target specific risk level
@@ -352,7 +354,8 @@ class PortfolioOptimizer:
                                     weights = hrp.optimize()
                                 except Exception as e3:
                                     logging.error(f"All optimization methods failed: {str(e3)}. Will use fallback weights.")
-                                    weights = None  # Explicitly set weights to None to trigger fallback
+                                    # Immediately return fallback weights instead of continuing
+                                    return fallback_weights, {**fallback_metrics, 'warning': f'Neutral optimization failed: {str(e3)}. Using equal weight portfolio.'}
                 else:
                     # This should never happen due to validation above, but just in case
                     logging.warning(f"Unhandled regime: {regime}. Using Neutral approach.")
@@ -368,12 +371,22 @@ class PortfolioOptimizer:
                             weights = ef.min_volatility()
                         except Exception as e2:
                             logging.error(f"Min volatility also failed for unhandled regime: {str(e2)}. Will use fallback weights.")
-                            weights = None  # Explicitly set weights to None to trigger fallback
+                            # Immediately return fallback weights instead of continuing
+                            return fallback_weights, {**fallback_metrics, 'warning': f'Unhandled regime optimization failed: {str(e2)}. Using equal weight portfolio.'}
                 
                 # Check if optimization failed completely and use fallback weights if needed
                 if weights is None:
                     logging.warning("All optimization methods failed. Using equal weight fallback.")
                     return fallback_weights, {**fallback_metrics, 'warning': 'All optimization methods failed. Using equal weight portfolio.'}
+                
+                # Verify weights is a dictionary before proceeding
+                if not isinstance(weights, dict):
+                    try:
+                        # Try to convert to dictionary if it's another format
+                        weights = dict(weights)
+                    except (TypeError, ValueError) as e:
+                        logging.error(f"Weights is not a dictionary and cannot be converted: {str(e)}")
+                        return fallback_weights, {**fallback_metrics, 'warning': 'Optimization produced invalid weights format. Using equal weight portfolio.'}
                 
                 # Clean weights with improved precision and error handling
                 try:
@@ -472,8 +485,8 @@ class PortfolioOptimizer:
                 return weights, metrics
             except Exception as opt_error:
                 logging.error(f"All optimization methods failed: {str(opt_error)}. Using equal weight fallback.")
-                # Use equal weight fallback with more descriptive warning
-                return fallback_weights, {**fallback_metrics, 'warning': f'Optimization failed: Weights not yet computed. Using equal weight portfolio.'}
+                # Use equal weight fallback with more descriptive warning that includes the actual error
+                return fallback_weights, {**fallback_metrics, 'warning': f'Optimization failed: {str(opt_error)}. Using equal weight portfolio.'}
 
         except Exception as e:
             logging.error(f"Portfolio optimization failed: {str(e)}")
