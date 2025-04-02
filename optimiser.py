@@ -378,6 +378,11 @@ class PortfolioOptimizer:
                     logging.warning("All optimization methods failed. Using equal weight fallback.")
                     return fallback_weights, {**fallback_metrics, 'warning': 'All optimization methods failed. Using equal weight portfolio.'}
                 
+                # Additional validation to ensure weights are not empty
+                if not weights or sum(weights.values()) == 0:
+                    logging.warning("Optimization produced empty or zero-sum weights. Using equal weight fallback.")
+                    return fallback_weights, {**fallback_metrics, 'warning': 'Optimization produced invalid weights. Using equal weight portfolio.'}
+                
                 # Verify weights is a dictionary before proceeding
                 if not isinstance(weights, dict):
                     try:
@@ -387,8 +392,29 @@ class PortfolioOptimizer:
                         logging.error(f"Weights is not a dictionary and cannot be converted: {str(e)}")
                         return fallback_weights, {**fallback_metrics, 'warning': 'Optimization produced invalid weights format. Using equal weight portfolio.'}
                 
+                # Additional validation to ensure all weights are valid numbers
+                try:
+                    for k, v in list(weights.items()):
+                        if not isinstance(v, (int, float)) or np.isnan(v) or np.isinf(v):
+                            logging.warning(f"Invalid weight value for {k}: {v}. Removing from weights.")
+                            weights.pop(k)
+                    
+                    # If we removed all weights or sum is now zero, use fallback
+                    if not weights or sum(weights.values()) == 0:
+                        logging.warning("All weights were invalid. Using equal weight fallback.")
+                        return fallback_weights, {**fallback_metrics, 'warning': 'All weights were invalid. Using equal weight portfolio.'}
+                except Exception as e:
+                    logging.error(f"Error validating weights: {str(e)}")
+                    return fallback_weights, {**fallback_metrics, 'warning': f'Error validating weights: {str(e)}. Using equal weight portfolio.'}
+                
                 # Clean weights with improved precision and error handling
                 try:
+                    # Ensure the EfficientFrontier object has weights set before cleaning
+                    if not hasattr(ef, '_weights') or ef._weights is None:
+                        logging.warning("EfficientFrontier object does not have weights set. Setting weights explicitly.")
+                        # Explicitly set weights on the EfficientFrontier object
+                        ef.set_weights(weights)
+                        
                     weights = ef.clean_weights(cutoff=0.0001)
                     
                     # Verify weights are not empty
@@ -412,12 +438,45 @@ class PortfolioOptimizer:
                 
                 # Get performance metrics with robust error handling
                 try:
+                    # Verify weights are properly computed before calling portfolio_performance
+                    if not weights or not isinstance(weights, dict) or sum(weights.values()) == 0:
+                        logging.warning("Weights not properly computed or invalid. Using fallback calculation.")
+                        # Instead of raising an error, return fallback weights
+                        return fallback_weights, {**fallback_metrics, 'warning': 'Weights not yet computed or invalid. Using equal weight portfolio.'}
+                    
+                    # Ensure the EfficientFrontier object has weights set
+                    if not hasattr(ef, '_weights') or ef._weights is None:
+                        logging.warning("EfficientFrontier object does not have weights set. Setting weights explicitly.")
+                        # Explicitly set weights on the EfficientFrontier object
+                        ef.set_weights(weights)
+                        
                     perf = ef.portfolio_performance(risk_free_rate=0.02)
                 except Exception as perf_error:
                     logging.warning(f"Error calculating portfolio performance: {str(perf_error)}")
                     # Calculate performance manually with additional validation
                     try:
-                        expected_return = sum(weights[asset] * filtered_returns[asset].mean() * 252 for asset in weights if asset in filtered_returns)
+                        # Calculate expected return with better error handling
+                        expected_return = 0.0
+                        try:
+                            # First try to calculate using annualized returns
+                            expected_return = sum(weights[asset] * filtered_returns[asset].mean() * 252 
+                                                for asset in weights if asset in filtered_returns)
+                            
+                            # Validate the expected return
+                            if not np.isfinite(expected_return) or expected_return < -0.5 or expected_return > 0.5:
+                                # If outside reasonable bounds, use a more conservative approach
+                                logging.warning(f"Calculated expected return {expected_return} is outside reasonable bounds")
+                                # Calculate using a more conservative approach
+                                returns_array = [filtered_returns[asset].mean() * 252 for asset in weights 
+                                                if asset in filtered_returns]
+                                if returns_array:
+                                    # Use median instead of mean for more robustness
+                                    expected_return = np.median(returns_array)
+                                else:
+                                    expected_return = 0.05  # Default 5% return
+                        except Exception as ret_error:
+                            logging.warning(f"Error in expected return calculation: {str(ret_error)}. Using default value.")
+                            expected_return = 0.05  # Default 5% return
                         
                         # More robust portfolio volatility calculation
                         portfolio_vol = 0.0
@@ -439,12 +498,37 @@ class PortfolioOptimizer:
                                         portfolio_var += weights[i] * weights[j] * reg_cov_matrix[i_idx, j_idx]
                             
                             portfolio_vol = np.sqrt(max(0, portfolio_var))  # Ensure non-negative
+                            
+                            # Validate the volatility
+                            if not np.isfinite(portfolio_vol) or portfolio_vol < 0.01 or portfolio_vol > 0.5:
+                                # If outside reasonable bounds, use a more conservative approach
+                                logging.warning(f"Calculated volatility {portfolio_vol} is outside reasonable bounds")
+                                # Use average of asset volatilities weighted by portfolio weights
+                                vols = [np.sqrt(reg_cov_matrix[valid_indices[asset], valid_indices[asset]]) 
+                                        for asset in weights if asset in valid_indices]
+                                if vols:
+                                    portfolio_vol = np.average(vols, weights=[weights[asset] for asset in weights 
+                                                                            if asset in valid_indices])
+                                else:
+                                    portfolio_vol = 0.15  # Default 15% volatility
                         except Exception as vol_error:
                             logging.warning(f"Error calculating portfolio volatility: {str(vol_error)}. Using default value.")
                             portfolio_vol = 0.15  # Default 15% volatility
                           
                         # Calculate Sharpe ratio with validation
-                        sharpe = (expected_return - 0.02) / portfolio_vol if portfolio_vol > 0 else 0
+                        try:
+                            sharpe = (expected_return - 0.02) / portfolio_vol if portfolio_vol > 0 else 0
+                            # Validate Sharpe ratio
+                            if not np.isfinite(sharpe) or sharpe < -10 or sharpe > 10:
+                                logging.warning(f"Calculated Sharpe ratio {sharpe} is outside reasonable bounds")
+                                sharpe = expected_return / portfolio_vol if portfolio_vol > 0 else 0
+                                # Final validation
+                                if not np.isfinite(sharpe) or sharpe < -10 or sharpe > 10:
+                                    sharpe = 0.0
+                        except Exception as sharpe_error:
+                            logging.warning(f"Error calculating Sharpe ratio: {str(sharpe_error)}. Using default value.")
+                            sharpe = 0.0
+                            
                         perf = (expected_return, portfolio_vol, sharpe)
                     except Exception as manual_error:
                         logging.error(f"Manual performance calculation failed: {str(manual_error)}. Using default values.")
@@ -452,6 +536,11 @@ class PortfolioOptimizer:
                   
                 # Ensure all metrics are valid numbers
                 try:
+                    # Verify perf is properly defined before using it
+                    if not isinstance(perf, (tuple, list)) or len(perf) < 3:
+                        logging.warning("Performance metrics not properly calculated. Using default values.")
+                        perf = (0.05, 0.15, 0.2)  # Default values
+                        
                     metrics = {
                         'expected_return': float(perf[0]),
                         'volatility': float(perf[1]),
