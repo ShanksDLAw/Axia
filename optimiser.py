@@ -308,8 +308,7 @@ class PortfolioOptimizer:
                             'feastol': 1e-8
                         }
                         weights = ef.efficient_risk(
-                            target_volatility=risk_params['target_volatility'],
-                            risk_free_rate=0.02
+                            target_volatility=risk_params['target_volatility']
                         )
                     except Exception as risk_error:
                         logging.warning(f"Efficient risk optimization failed: {str(risk_error)}. Trying alternative approaches.")
@@ -327,8 +326,7 @@ class PortfolioOptimizer:
                                 'acceleration_lookback': 20
                             }
                             weights = ef.efficient_risk(
-                                target_volatility=risk_params['target_volatility'] * 1.1,  # Allow 10% higher volatility
-                                risk_free_rate=0.02
+                                target_volatility=risk_params['target_volatility'] * 1.1  # Allow 10% higher volatility
                             )
                         except Exception as e1:
                             logging.warning(f"Relaxed efficient_risk failed: {str(e1)}. Trying min_volatility.")
@@ -361,8 +359,7 @@ class PortfolioOptimizer:
                     ef.solver = 'ECOS'
                     try:
                         weights = ef.efficient_risk(
-                            target_volatility=risk_params['target_volatility'],
-                            risk_free_rate=0.02
+                            target_volatility=risk_params['target_volatility']
                         )
                     except Exception as e:
                         logging.warning(f"Efficient risk failed for unhandled regime: {str(e)}. Using min volatility.")
@@ -420,9 +417,26 @@ class PortfolioOptimizer:
                 
                 # Clean weights with improved precision and error handling
                 try:
+                    # Ensure weights is a valid dictionary before setting on EfficientFrontier
+                    if not isinstance(weights, dict) or not weights:
+                        logging.warning("Weights is not a valid dictionary before cleaning. Attempting to convert.")
+                        try:
+                            weights = dict(weights) if weights else {}
+                        except (TypeError, ValueError) as e:
+                            logging.warning(f"Cannot convert weights to dictionary: {str(e)}. Using original weights.")
+                    
+                    # Ensure weights sum to a reasonable value before setting
+                    weights_sum = sum(weights.values()) if weights else 0
+                    if weights_sum < 1e-6:
+                        logging.warning(f"Weights sum too small before cleaning: {weights_sum}. Using original weights.")
+                    else:
+                        # Normalize weights if needed
+                        if abs(weights_sum - 1.0) > 1e-4:
+                            weights = {k: v/weights_sum for k, v in weights.items()}
+                    
                     # Ensure the EfficientFrontier object has weights set before cleaning
-                    if not hasattr(ef, '_weights') or ef._weights is None:
-                        logging.warning("EfficientFrontier object does not have weights set. Setting weights explicitly.")
+                    if not hasattr(ef, '_weights') or ef._weights is None or sum(ef._weights.values() if hasattr(ef._weights, 'values') else [0]) < 1e-6:
+                        logging.warning("EfficientFrontier object does not have valid weights set. Setting weights explicitly.")
                         # Explicitly set weights on the EfficientFrontier object
                         ef.set_weights(weights)
                     
@@ -499,10 +513,19 @@ class PortfolioOptimizer:
                         return fallback_weights, {**fallback_metrics, 'warning': 'All weights were too small. Using equal weight portfolio.'}
                      
                     # Ensure the EfficientFrontier object has weights set
-                    if not hasattr(ef, '_weights') or ef._weights is None:
-                        logging.warning("EfficientFrontier object does not have weights set. Setting weights explicitly.")
+                    if not hasattr(ef, '_weights') or ef._weights is None or sum(ef._weights.values() if hasattr(ef._weights, 'values') else [0]) < 1e-6:
+                        logging.warning("EfficientFrontier object does not have valid weights set for performance calculation. Setting weights explicitly.")
                         # Explicitly set weights on the EfficientFrontier object
-                        ef.set_weights(weights)
+                        try:
+                            # Normalize weights before setting to ensure they sum to 1
+                            weights_sum = sum(weights.values())
+                            if abs(weights_sum - 1.0) > 1e-4 and weights_sum > 1e-6:
+                                normalized_weights = {k: v/weights_sum for k, v in weights.items()}
+                                ef.set_weights(normalized_weights)
+                            else:
+                                ef.set_weights(weights)
+                        except Exception as set_weights_error:
+                            logging.warning(f"Error setting weights on EfficientFrontier: {str(set_weights_error)}")
                     
                     # Try to get performance metrics from the EfficientFrontier object
                     try:
