@@ -378,11 +378,6 @@ class PortfolioOptimizer:
                     logging.warning("All optimization methods failed. Using equal weight fallback.")
                     return fallback_weights, {**fallback_metrics, 'warning': 'All optimization methods failed. Using equal weight portfolio.'}
                 
-                # Additional validation to ensure weights are not empty
-                if not weights or sum(weights.values()) == 0:
-                    logging.warning("Optimization produced empty or zero-sum weights. Using equal weight fallback.")
-                    return fallback_weights, {**fallback_metrics, 'warning': 'Optimization produced invalid weights. Using equal weight portfolio.'}
-                
                 # Verify weights is a dictionary before proceeding
                 if not isinstance(weights, dict):
                     try:
@@ -391,6 +386,22 @@ class PortfolioOptimizer:
                     except (TypeError, ValueError) as e:
                         logging.error(f"Weights is not a dictionary and cannot be converted: {str(e)}")
                         return fallback_weights, {**fallback_metrics, 'warning': 'Optimization produced invalid weights format. Using equal weight portfolio.'}
+                
+                # Additional validation to ensure weights are not empty
+                if not weights:
+                    logging.warning("Optimization produced empty weights. Using equal weight fallback.")
+                    return fallback_weights, {**fallback_metrics, 'warning': 'Optimization produced empty weights. Using equal weight portfolio.'}
+                
+                # Check for zero-sum weights with a more lenient threshold
+                weights_sum = sum(weights.values())
+                if weights_sum < 1e-6:  # More lenient check for zero sum
+                    logging.warning(f"Optimization produced zero-sum weights (sum={weights_sum}). Using equal weight fallback.")
+                    return fallback_weights, {**fallback_metrics, 'warning': 'Optimization produced zero-sum weights. Using equal weight portfolio.'}
+                
+                # Normalize weights if they don't sum to 1.0 (within tolerance)
+                if abs(weights_sum - 1.0) > 1e-4:
+                    logging.info(f"Normalizing weights. Current sum: {weights_sum}")
+                    weights = {k: v/weights_sum for k, v in weights.items()}
                 
                 # Additional validation to ensure all weights are valid numbers
                 try:
@@ -414,43 +425,91 @@ class PortfolioOptimizer:
                         logging.warning("EfficientFrontier object does not have weights set. Setting weights explicitly.")
                         # Explicitly set weights on the EfficientFrontier object
                         ef.set_weights(weights)
-                        
-                    weights = ef.clean_weights(cutoff=0.0001)
+                    
+                    # Try to clean weights, but handle any errors gracefully
+                    try:
+                        cleaned_weights = ef.clean_weights(cutoff=0.0001)
+                        # Only use cleaned weights if they're valid
+                        if cleaned_weights and sum(cleaned_weights.values()) > 1e-6:
+                            weights = cleaned_weights
+                        else:
+                            logging.warning("clean_weights returned invalid weights. Using original weights.")
+                    except Exception as clean_inner_error:
+                        logging.warning(f"clean_weights failed: {str(clean_inner_error)}. Using original weights.")
                     
                     # Verify weights are not empty
                     if not weights:
-                        logging.warning("clean_weights returned empty weights. Using fallback weights.")
+                        logging.warning("Weights are empty after cleaning. Using fallback weights.")
                         return fallback_weights, {**fallback_metrics, 'warning': 'Optimization produced empty weights. Using equal weight portfolio.'}
                     
-                    # Ensure weights sum to 1.0 (sometimes clean_weights can result in sum < 1)
+                    # Ensure weights sum to 1.0 with more robust handling
                     weight_sum = sum(weights.values())
                     if abs(weight_sum - 1.0) > 1e-5:  # If weights don't sum to approximately 1
-                        if weight_sum > 0:  # Only normalize if sum is positive
+                        if weight_sum > 1e-6:  # Only normalize if sum is positive and non-zero
                             logging.info(f"Adjusting weights to sum to 1.0 (current sum: {weight_sum})")
                             # Normalize weights to sum to 1
                             weights = {k: v/weight_sum for k, v in weights.items()}
                         else:
-                            logging.warning("Weights sum to zero or negative. Using fallback weights.")
-                            return fallback_weights, {**fallback_metrics, 'warning': 'Optimization produced invalid weights. Using equal weight portfolio.'}
+                            logging.warning(f"Weights sum too small: {weight_sum}. Using fallback weights.")
+                            return fallback_weights, {**fallback_metrics, 'warning': 'Optimization produced invalid weights sum. Using equal weight portfolio.'}
                 except Exception as clean_error:
                     logging.error(f"Error cleaning weights: {str(clean_error)}. Using fallback weights.")
                     return fallback_weights, {**fallback_metrics, 'warning': f'Error cleaning weights: {str(clean_error)}. Using equal weight portfolio.'}
                 
                 # Get performance metrics with robust error handling
                 try:
-                    # Verify weights are properly computed before calling portfolio_performance
-                    if not weights or not isinstance(weights, dict) or sum(weights.values()) == 0:
-                        logging.warning("Weights not properly computed or invalid. Using fallback calculation.")
+                    # Final validation of weights before performance calculation
+                    if weights is None:
+                        logging.warning("Weights not computed. Using fallback calculation.")
                         # Instead of raising an error, return fallback weights
-                        return fallback_weights, {**fallback_metrics, 'warning': 'Weights not yet computed or invalid. Using equal weight portfolio.'}
+                        return fallback_weights, {**fallback_metrics, 'warning': 'Weights not computed. Using equal weight portfolio.'}
                     
+                    # Ensure weights is a dictionary
+                    if not isinstance(weights, dict):
+                        logging.warning(f"Weights is not a dictionary: {type(weights)}. Attempting to convert.")
+                        try:
+                            # Try to convert to dictionary if it's another format
+                            weights = dict(weights)
+                        except (TypeError, ValueError) as e:
+                            logging.error(f"Cannot convert weights to dictionary: {str(e)}")
+                            return fallback_weights, {**fallback_metrics, 'warning': f'Invalid weights format: {str(e)}. Using equal weight portfolio.'}
+                    
+                    # Check if weights is empty
+                    if not weights:
+                        logging.warning("Weights dictionary is empty. Using fallback calculation.")
+                        return fallback_weights, {**fallback_metrics, 'warning': 'Empty weights dictionary. Using equal weight portfolio.'}
+                    
+                    # Check if weights sum is too small (near zero)
+                    weights_sum = sum(weights.values())
+                    if weights_sum < 1e-6:  # More lenient check for zero sum
+                        logging.warning(f"Weights sum too small: {weights_sum}. Using fallback calculation.")
+                        return fallback_weights, {**fallback_metrics, 'warning': 'Weights sum too small. Using equal weight portfolio.'}
+                        
+                    # Final normalization to ensure weights sum to 1.0
+                    if abs(weights_sum - 1.0) > 1e-4:
+                        logging.info(f"Final normalization of weights. Current sum: {weights_sum}")
+                        weights = {k: v/weights_sum for k, v in weights.items()}
+                    
+                    # Remove any extremely small weights that might cause numerical issues
+                    weights = {k: v for k, v in weights.items() if v > 1e-5}
+                    
+                    # If we removed all weights, use fallback
+                    if not weights:
+                        logging.warning("All weights were too small. Using fallback weights.")
+                        return fallback_weights, {**fallback_metrics, 'warning': 'All weights were too small. Using equal weight portfolio.'}
+                     
                     # Ensure the EfficientFrontier object has weights set
                     if not hasattr(ef, '_weights') or ef._weights is None:
                         logging.warning("EfficientFrontier object does not have weights set. Setting weights explicitly.")
                         # Explicitly set weights on the EfficientFrontier object
                         ef.set_weights(weights)
-                        
-                    perf = ef.portfolio_performance(risk_free_rate=0.02)
+                    
+                    # Try to get performance metrics from the EfficientFrontier object
+                    try:
+                        perf = ef.portfolio_performance(risk_free_rate=0.02)
+                    except Exception as perf_ef_error:
+                        logging.warning(f"EfficientFrontier performance calculation failed: {str(perf_ef_error)}. Calculating manually.")
+                        # If this fails, we'll calculate manually in the exception handler below
                 except Exception as perf_error:
                     logging.warning(f"Error calculating portfolio performance: {str(perf_error)}")
                     # Calculate performance manually with additional validation
@@ -572,7 +631,7 @@ class PortfolioOptimizer:
 
                 return weights, metrics
             except Exception as opt_error:
-                logging.error(f"All optimization methods failed: {str(opt_error)}. Using equal weight fallback.")
+                logging.warning(f"All optimization methods failed: {str(opt_error)}. Using equal weight fallback.")
                 # Use equal weight fallback with more descriptive warning that includes the actual error
                 return fallback_weights, {**fallback_metrics, 'warning': f'Optimization failed: {str(opt_error)}. Using equal weight portfolio.'}
 
