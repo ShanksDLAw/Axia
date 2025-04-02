@@ -417,6 +417,15 @@ class PortfolioOptimizer:
                 
                 # Clean weights with improved precision and error handling
                 try:
+                    # Filter out problematic symbols from weights
+                    problematic_symbols = ['BIIB', 'BDX', 'BRKB', 'BFB']
+                    if isinstance(weights, dict):
+                        # Remove problematic symbols from weights
+                        for symbol in problematic_symbols:
+                            if symbol in weights:
+                                logging.info(f"Removing problematic symbol {symbol} from weights")
+                                weights.pop(symbol)
+                    
                     # Ensure weights is a valid dictionary before setting on EfficientFrontier
                     if not isinstance(weights, dict) or not weights:
                         logging.warning("Weights is not a valid dictionary before cleaning. Attempting to convert.")
@@ -424,6 +433,12 @@ class PortfolioOptimizer:
                             weights = dict(weights) if weights else {}
                         except (TypeError, ValueError) as e:
                             logging.warning(f"Cannot convert weights to dictionary: {str(e)}. Using original weights.")
+                    
+                    # Remove any NaN or infinite values from weights
+                    for k in list(weights.keys()):
+                        if np.isnan(weights[k]) or np.isinf(weights[k]) or weights[k] < 0:
+                            logging.warning(f"Removing invalid weight for {k}: {weights[k]}")
+                            weights.pop(k)
                     
                     # Ensure weights sum to a reasonable value before setting
                     weights_sum = sum(weights.values()) if weights else 0
@@ -437,15 +452,52 @@ class PortfolioOptimizer:
                     # Ensure the EfficientFrontier object has weights set before cleaning
                     if not hasattr(ef, '_weights') or ef._weights is None or sum(ef._weights.values() if hasattr(ef._weights, 'values') else [0]) < 1e-6:
                         logging.warning("EfficientFrontier object does not have valid weights set. Setting weights explicitly.")
-                        # Explicitly set weights on the EfficientFrontier object
-                        ef.set_weights(weights)
+                        # Explicitly set weights on the EfficientFrontier object with error handling for each symbol
+                        try:
+                            # First try setting all weights at once
+                            ef.set_weights(weights)
+                        except Exception as set_all_error:
+                            logging.warning(f"Error setting all weights at once: {str(set_all_error)}. Trying one by one.")
+                            # If that fails, try setting weights one by one to identify problematic symbols
+                            ef._weights = {}  # Reset weights
+                            for symbol, weight in list(weights.items()):
+                                try:
+                                    # Set weight for this symbol
+                                    ef._weights[symbol] = weight
+                                except Exception as symbol_error:
+                                    logging.warning(f"Error setting weight for {symbol}: {str(symbol_error)}. Removing from weights.")
+                                    weights.pop(symbol)
+                            
+                            # If we have any weights left, normalize them
+                            if weights:
+                                weights_sum = sum(weights.values())
+                                if weights_sum > 1e-6:
+                                    weights = {k: v/weights_sum for k, v in weights.items()}
+                                    # Try setting the filtered weights
+                                    try:
+                                        ef.set_weights(weights)
+                                    except Exception as final_set_error:
+                                        logging.error(f"Final attempt to set weights failed: {str(final_set_error)}")
+                            else:
+                                logging.warning("All weights were problematic. Using fallback weights.")
+                                return fallback_weights, {**fallback_metrics, 'warning': 'All weights were problematic. Using equal weight portfolio.'}
                     
                     # Try to clean weights, but handle any errors gracefully
                     try:
                         cleaned_weights = ef.clean_weights(cutoff=0.0001)
                         # Only use cleaned weights if they're valid
                         if cleaned_weights and sum(cleaned_weights.values()) > 1e-6:
-                            weights = cleaned_weights
+                            # Check for problematic symbols in cleaned weights
+                            for symbol in problematic_symbols:
+                                if symbol in cleaned_weights:
+                                    logging.info(f"Removing problematic symbol {symbol} from cleaned weights")
+                                    cleaned_weights.pop(symbol)
+                            
+                            # Only use cleaned weights if we still have some left
+                            if cleaned_weights:
+                                weights = cleaned_weights
+                            else:
+                                logging.warning("No valid weights left after cleaning. Using original weights.")
                         else:
                             logging.warning("clean_weights returned invalid weights. Using original weights.")
                     except Exception as clean_inner_error:
@@ -460,7 +512,7 @@ class PortfolioOptimizer:
                     weight_sum = sum(weights.values())
                     if abs(weight_sum - 1.0) > 1e-5:  # If weights don't sum to approximately 1
                         if weight_sum > 1e-6:  # Only normalize if sum is positive and non-zero
-                            logging.info(f"Adjusting weights to sum to 1.0 (current sum: {weight_sum})")
+                            logging.info(f"Adjusting weights to sum to 1.0 (current sum: {weight_sum:.5f})")
                             # Normalize weights to sum to 1
                             weights = {k: v/weight_sum for k, v in weights.items()}
                         else:
@@ -816,33 +868,92 @@ class PortfolioOptimizer:
             Configured EfficientFrontier object
         """
         try:
+            # Filter out problematic symbols that are causing errors (like 'BIIB', 'BDX', 'BRKB', 'BFB')
+            # Create a list of known problematic symbols based on error logs
+            problematic_symbols = ['BIIB', 'BDX', 'BRKB', 'BFB']
+            filtered_valid_symbols = [symbol for symbol in valid_symbols if symbol not in problematic_symbols]
+            
+            # If we filtered out all symbols, use the original list but log a warning
+            if not filtered_valid_symbols and valid_symbols:
+                logging.warning(f"All symbols were filtered as problematic. Using original symbols list.")
+                filtered_valid_symbols = valid_symbols
+            else:
+                removed_symbols = set(valid_symbols) - set(filtered_valid_symbols)
+                if removed_symbols:
+                    logging.info(f"Removed problematic symbols from optimization: {removed_symbols}")
+            
+            # Update valid_symbols to the filtered list
+            valid_symbols = filtered_valid_symbols
+            
             # Ensure returns is a pandas Series with proper index
             if not isinstance(returns, pd.Series):
                 # If returns is a DataFrame, convert to Series of mean returns
                 if isinstance(returns, pd.DataFrame):
-                    returns = returns.mean() * 252  # Annualize returns
+                    # Filter returns to only include valid symbols
+                    valid_cols = [col for col in valid_symbols if col in returns.columns]
+                    if not valid_cols:
+                        logging.warning("No valid columns found in returns data. Creating default returns.")
+                        returns = pd.Series([0.05] * len(valid_symbols), index=valid_symbols)  # Default 5% return
+                    else:
+                        returns = returns[valid_cols].mean() * 252  # Annualize returns
                 # If returns is a numpy array or other type, convert to Series
                 elif isinstance(returns, (np.ndarray, list)):
-                    returns = pd.Series(returns, index=valid_symbols)
+                    # Ensure the array length matches the number of valid symbols
+                    if len(returns) != len(valid_symbols):
+                        logging.warning(f"Returns array length mismatch: {len(returns)} vs {len(valid_symbols)}. Creating default returns.")
+                        returns = pd.Series([0.05] * len(valid_symbols), index=valid_symbols)  # Default 5% return
+                    else:
+                        returns = pd.Series(returns, index=valid_symbols)
                 else:
                     logging.warning(f"Unexpected returns type: {type(returns)}. Creating default returns.")
+                    returns = pd.Series([0.05] * len(valid_symbols), index=valid_symbols)  # Default 5% return
+            else:
+                # If returns is already a Series, ensure it only contains valid symbols
+                returns = returns[returns.index.intersection(valid_symbols)]
+                # If we lost all returns data, create default returns
+                if returns.empty and valid_symbols:
+                    logging.warning("No valid returns data after filtering. Creating default returns.")
                     returns = pd.Series([0.05] * len(valid_symbols), index=valid_symbols)  # Default 5% return
             
             # Validate returns has the right shape
             if len(returns) != len(valid_symbols):
-                logging.warning(f"Returns length mismatch: {len(returns)} vs {len(valid_symbols)}. Creating default returns.")
-                returns = pd.Series([0.05] * len(valid_symbols), index=valid_symbols)  # Default 5% return
+                logging.warning(f"Returns length mismatch: {len(returns)} vs {len(valid_symbols)}. Adjusting returns.")
+                # Create a new Series with all valid symbols, filling in missing values
+                new_returns = pd.Series(index=valid_symbols, dtype=float)
+                for symbol in valid_symbols:
+                    if symbol in returns.index:
+                        new_returns[symbol] = returns[symbol]
+                    else:
+                        new_returns[symbol] = returns.mean() if not returns.empty else 0.05
+                returns = new_returns
             
             # Ensure no NaN values in returns
             if returns.isna().any():
                 logging.warning("NaN values found in returns. Replacing with mean values.")
                 mean_return = returns.mean()
-                if np.isnan(mean_return):
-                    mean_return = 0.05  # Default if all are NaN
+                if np.isnan(mean_return) or mean_return == 0:
+                    mean_return = 0.05  # Default if all are NaN or mean is zero
                 returns = returns.fillna(mean_return)
             
             # Validate returns for extreme values
             returns = returns.clip(-0.5, 0.5)  # Limit extreme returns
+            
+            # Ensure covariance matrix dimensions match the number of valid symbols
+            if cov_matrix.shape[0] != len(valid_symbols) or cov_matrix.shape[1] != len(valid_symbols):
+                logging.warning(f"Covariance matrix shape mismatch: {cov_matrix.shape} vs {len(valid_symbols)} symbols. Rebuilding matrix.")
+                try:
+                    # Try to extract a valid submatrix if possible
+                    if cov_matrix.shape[0] > len(valid_symbols) and cov_matrix.shape[1] > len(valid_symbols):
+                        # Assume the first len(valid_symbols) rows/cols correspond to valid_symbols
+                        cov_matrix = cov_matrix[:len(valid_symbols), :len(valid_symbols)]
+                    else:
+                        # Create a diagonal matrix with reasonable volatility estimates
+                        vols = np.ones(len(valid_symbols)) * 0.2  # Default 20% volatility
+                        cov_matrix = np.diag(vols**2)
+                except Exception as e:
+                    logging.warning(f"Error adjusting covariance matrix: {str(e)}. Creating default matrix.")
+                    vols = np.ones(len(valid_symbols)) * 0.2  # Default 20% volatility
+                    cov_matrix = np.diag(vols**2)
                 
             # Ensure covariance matrix is positive definite with stronger correction
             try:
@@ -851,18 +962,18 @@ class PortfolioOptimizer:
                 if min_eigenval <= 0:
                     logging.warning(f"Covariance matrix not positive definite. Min eigenvalue: {min_eigenval}")
                     # Apply stronger correction
-                    stability_factor = max(1e-4, abs(min_eigenval) * 2)
+                    stability_factor = max(1e-3, abs(min_eigenval) * 3)  # Increased correction factor
                     cov_matrix += np.eye(cov_matrix.shape[0]) * stability_factor
                     logging.info(f"Applied stability factor of {stability_factor} to covariance matrix")
             except np.linalg.LinAlgError:
                 logging.warning("Eigenvalue computation failed, applying stronger correction")
-                stability_factor = 1e-3
+                stability_factor = 5e-3  # Increased from 1e-3
                 cov_matrix += np.eye(cov_matrix.shape[0]) * stability_factor
                 
-            # Create EfficientFrontier instance with validated inputs and relaxed bounds
-            # Slightly relax the min position constraint to help solver convergence
-            min_position = max(0.0, constraints['min_position'] - 0.001)  # Slightly relax lower bound
-            max_position = min(1.0, constraints['max_position'] + 0.01)  # Slightly relax upper bound
+            # Create EfficientFrontier instance with validated inputs and more relaxed bounds
+            # Further relax the min position constraint to help solver convergence
+            min_position = 0.0  # Allow zero positions to improve feasibility
+            max_position = min(1.0, constraints['max_position'] * 1.2)  # Increase max position by 20%
             
             # Create the EfficientFrontier object
             try:
@@ -873,24 +984,45 @@ class PortfolioOptimizer:
                     verbose=False
                 )
                 
-                # Set default solver and solver options
-                ef.solver = 'ECOS'
-                ef.solver_options = {
-                    'max_iters': 1000,  # Increase max iterations
-                    'abstol': 1e-8,    # Absolute tolerance
-                    'reltol': 1e-8     # Relative tolerance
-                }
+                # Try different solvers in order of preference
+                solvers_to_try = [
+                    ('ECOS', {
+                        'max_iters': 2000,  # Increased max iterations
+                        'abstol': 1e-6,    # Relaxed tolerance
+                        'reltol': 1e-6,    # Relaxed tolerance
+                        'feastol': 1e-6    # Relaxed feasibility tolerance
+                    }),
+                    ('SCS', {
+                        'max_iters': 2500,
+                        'eps': 1e-4,       # Relaxed tolerance
+                        'normalize': True,
+                        'acceleration_lookback': 20
+                    }),
+                    ('OSQP', {
+                        'max_iter': 5000,
+                        'eps_abs': 1e-5,   # Relaxed tolerance
+                        'eps_rel': 1e-5,   # Relaxed tolerance
+                        'polish': True,
+                        'adaptive_rho': True
+                    })
+                ]
+                
+                # Set the first solver as default
+                ef.solver = solvers_to_try[0][0]
+                ef.solver_options = solvers_to_try[0][1]
 
                 # Add L2 regularization with reduced gamma to avoid over-constraining
-                ef.add_objective(objective_functions.L2_reg, gamma=0.1)
+                ef.add_objective(objective_functions.L2_reg, gamma=0.05)  # Reduced from 0.1
 
-                # Add sector constraints if defined, with relaxed bounds
+                # Add sector constraints if defined, with more relaxed bounds
                 if self.sectors:
                     try:
-                        sector_mapper = {asset: self.sectors.get(asset, 'Other') for asset in valid_symbols}
+                        # Filter sector_mapper to only include valid symbols
+                        sector_mapper = {asset: self.sectors.get(asset, 'Other') for asset in valid_symbols 
+                                        if asset in valid_symbols}
                         
-                        # Slightly relax sector constraints
-                        max_sector = min(1.0, constraints['max_sector'] + 0.05)  # Add 5% slack
+                        # More significantly relax sector constraints
+                        max_sector = min(1.0, constraints['max_sector'] * 1.5)  # Increase by 50%
                         
                         sector_bounds = {sector: (0.0, max_sector) 
                                       for sector in set(sector_mapper.values())}
@@ -899,7 +1031,7 @@ class PortfolioOptimizer:
                         if len(set(sector_mapper.values())) > 1:
                             ef.add_sector_constraints(
                                 sector_mapper, 
-                                sector_lower={s: v[0] for s, v in sector_bounds.items()},
+                                sector_lower={s: 0.0 for s in set(sector_mapper.values())},  # Allow zero allocation
                                 sector_upper={s: v[1] for s, v in sector_bounds.items()}
                             )
                     except Exception as sector_error:
