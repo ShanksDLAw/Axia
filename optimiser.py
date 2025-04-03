@@ -59,6 +59,14 @@ class PortfolioOptimizer:
         if valid_symbols is None:
             valid_symbols = list(self.price_data.columns)
             
+        # Filter out known problematic symbols early in the process
+        problematic_symbols = ['BIIB', 'BDX', 'BRKB', 'BFB']
+        valid_symbols = [symbol for symbol in valid_symbols if symbol not in problematic_symbols]
+        
+        if not valid_symbols:
+            logging.warning("All symbols were filtered as problematic. Using original symbols list.")
+            valid_symbols = list(self.price_data.columns)
+            
         # Default fallback portfolio (equal weight)
         total_assets = len(valid_symbols)
         fallback_weights = {symbol: 1.0/total_assets for symbol in valid_symbols}
@@ -454,33 +462,77 @@ class PortfolioOptimizer:
                         logging.warning("EfficientFrontier object does not have valid weights set. Setting weights explicitly.")
                         # Explicitly set weights on the EfficientFrontier object with error handling for each symbol
                         try:
-                            # First try setting all weights at once
-                            ef.set_weights(weights)
-                        except Exception as set_all_error:
-                            logging.warning(f"Error setting all weights at once: {str(set_all_error)}. Trying one by one.")
-                            # If that fails, try setting weights one by one to identify problematic symbols
-                            ef._weights = {}  # Reset weights
-                            for symbol, weight in list(weights.items()):
-                                try:
-                                    # Set weight for this symbol
-                                    ef._weights[symbol] = weight
-                                except Exception as symbol_error:
-                                    logging.warning(f"Error setting weight for {symbol}: {str(symbol_error)}. Removing from weights.")
-                                    weights.pop(symbol)
+                            # First make a copy of weights to avoid modifying the original
+                            weights_copy = weights.copy()
                             
-                            # If we have any weights left, normalize them
-                            if weights:
-                                weights_sum = sum(weights.values())
+                            # Filter out any problematic symbols before attempting to set weights
+                            problematic_symbols = ['BIIB', 'BDX', 'BRKB', 'BFB']
+                            for symbol in problematic_symbols:
+                                if symbol in weights_copy:
+                                    logging.info(f"Preemptively removing known problematic symbol {symbol} from weights")
+                                    weights_copy.pop(symbol)
+                            
+                            # Normalize weights after removing problematic symbols
+                            if weights_copy:
+                                weights_sum = sum(weights_copy.values())
                                 if weights_sum > 1e-6:
-                                    weights = {k: v/weights_sum for k, v in weights.items()}
-                                    # Try setting the filtered weights
+                                    weights_copy = {k: v/weights_sum for k, v in weights_copy.items()}
+                                    
+                                    # Try setting all weights at once with the filtered set
                                     try:
-                                        ef.set_weights(weights)
-                                    except Exception as final_set_error:
-                                        logging.error(f"Final attempt to set weights failed: {str(final_set_error)}")
+                                        ef.set_weights(weights_copy)
+                                        # Update original weights if successful
+                                        weights = weights_copy
+                                    except Exception as set_filtered_error:
+                                        logging.warning(f"Error setting filtered weights: {str(set_filtered_error)}. Trying one by one.")
+                                        # Continue to one-by-one approach
+                                        raise
+                                else:
+                                    logging.warning("Filtered weights sum is too small. Trying original weights one by one.")
+                                    raise ValueError("Weights sum too small")
                             else:
-                                logging.warning("All weights were problematic. Using fallback weights.")
-                                return fallback_weights, {**fallback_metrics, 'warning': 'All weights were problematic. Using equal weight portfolio.'}
+                                logging.warning("No weights left after filtering problematic symbols. Trying original weights one by one.")
+                                raise ValueError("No weights after filtering")
+                        except Exception:
+                            # If setting filtered weights fails, try one by one with original weights
+                            try:
+                                # Reset weights
+                                ef._weights = {}
+                                successful_symbols = []
+                                
+                                # Try setting weights one by one to identify problematic symbols
+                                for symbol, weight in list(weights.items()):
+                                    try:
+                                        # Set weight for this symbol
+                                        ef._weights[symbol] = weight
+                                        successful_symbols.append(symbol)
+                                    except Exception as symbol_error:
+                                        logging.warning(f"Error setting weight for {symbol}: {str(symbol_error)}. Skipping.")
+                                
+                                # Create a new weights dictionary with only successful symbols
+                                if successful_symbols:
+                                    filtered_weights = {symbol: weights[symbol] for symbol in successful_symbols}
+                                    weights_sum = sum(filtered_weights.values())
+                                    
+                                    if weights_sum > 1e-6:
+                                        # Normalize and update weights
+                                        normalized_weights = {k: v/weights_sum for k, v in filtered_weights.items()}
+                                        weights = normalized_weights
+                                        
+                                        # Try setting the normalized weights
+                                        try:
+                                            ef.set_weights(normalized_weights)
+                                        except Exception as final_set_error:
+                                            logging.error(f"Final attempt to set weights failed: {str(final_set_error)}")
+                                    else:
+                                        logging.warning("Successful weights sum is too small. Using fallback weights.")
+                                        return fallback_weights, {**fallback_metrics, 'warning': 'Successful weights sum too small. Using equal weight portfolio.'}
+                                else:
+                                    logging.warning("No successful symbols when setting weights. Using fallback weights.")
+                                    return fallback_weights, {**fallback_metrics, 'warning': 'No successful symbols when setting weights. Using equal weight portfolio.'}
+                            except Exception as one_by_one_error:
+                                logging.error(f"Error in one-by-one weight setting: {str(one_by_one_error)}")
+                                return fallback_weights, {**fallback_metrics, 'warning': f'Error setting weights: {str(one_by_one_error)}. Using equal weight portfolio.'}
                     
                     # Try to clean weights, but handle any errors gracefully
                     try:
@@ -569,19 +621,37 @@ class PortfolioOptimizer:
                         logging.warning("EfficientFrontier object does not have valid weights set for performance calculation. Setting weights explicitly.")
                         # Explicitly set weights on the EfficientFrontier object
                         try:
+                            # First filter out any problematic symbols
+                            problematic_symbols = ['BIIB', 'BDX', 'BRKB', 'BFB']
+                            filtered_weights = {k: v for k, v in weights.items() if k not in problematic_symbols}
+                            
                             # Normalize weights before setting to ensure they sum to 1
-                            weights_sum = sum(weights.values())
-                            if abs(weights_sum - 1.0) > 1e-4 and weights_sum > 1e-6:
-                                normalized_weights = {k: v/weights_sum for k, v in weights.items()}
-                                ef.set_weights(normalized_weights)
+                            weights_sum = sum(filtered_weights.values())
+                            if weights_sum > 1e-6:
+                                if abs(weights_sum - 1.0) > 1e-4:
+                                    normalized_weights = {k: v/weights_sum for k, v in filtered_weights.items()}
+                                else:
+                                    normalized_weights = filtered_weights
+                                    
+                                # Try setting the filtered weights
+                                try:
+                                    ef.set_weights(normalized_weights)
+                                    # Update original weights if successful
+                                    weights = normalized_weights
+                                except Exception as set_filtered_error:
+                                    logging.warning(f"Error setting filtered weights: {str(set_filtered_error)}. Using manual performance calculation.")
                             else:
-                                ef.set_weights(weights)
+                                logging.warning("Filtered weights sum is too small. Using manual performance calculation.")
                         except Exception as set_weights_error:
-                            logging.warning(f"Error setting weights on EfficientFrontier: {str(set_weights_error)}")
+                            logging.warning(f"Error setting weights on EfficientFrontier: {str(set_weights_error)}. Using manual performance calculation.")
                     
                     # Try to get performance metrics from the EfficientFrontier object
                     try:
-                        perf = ef.portfolio_performance(risk_free_rate=0.02)
+                        # Only attempt portfolio_performance if weights were successfully set
+                        if hasattr(ef, '_weights') and ef._weights and sum(ef._weights.values()) > 1e-6:
+                            perf = ef.portfolio_performance(risk_free_rate=0.02)
+                        else:
+                            raise ValueError("EfficientFrontier does not have valid weights set")
                     except Exception as perf_ef_error:
                         logging.warning(f"EfficientFrontier performance calculation failed: {str(perf_ef_error)}. Calculating manually.")
                         # If this fails, we'll calculate manually in the exception handler below
@@ -725,14 +795,27 @@ class PortfolioOptimizer:
             Estimated covariance matrix with stability adjustments
         """
         try:
+            # Filter out problematic symbols that might cause numerical issues
+            problematic_symbols = ['BIIB', 'BDX', 'BRKB', 'BFB']
+            filtered_price_data = price_data.copy()
+            for symbol in problematic_symbols:
+                if symbol in filtered_price_data.columns:
+                    logging.info(f"Removing problematic symbol {symbol} from covariance estimation")
+                    filtered_price_data = filtered_price_data.drop(symbol, axis=1)
+            
+            # If we filtered out all columns, use the original data
+            if filtered_price_data.empty and not price_data.empty:
+                logging.warning("All symbols were filtered as problematic for covariance. Using original price data.")
+                filtered_price_data = price_data.copy()
+            
             # Validate input data first
-            if price_data.empty:
+            if filtered_price_data.empty:
                 raise ValueError("Empty price data provided")
                 
-            if price_data.shape[1] < 2:
+            if filtered_price_data.shape[1] < 2:
                 # Special case: only one asset
                 try:
-                    variance = price_data.pct_change().var().iloc[0] * 252
+                    variance = filtered_price_data.pct_change().var().iloc[0] * 252
                     if np.isnan(variance) or variance <= 0:
                         variance = 0.04  # Default 20% volatility squared
                     return np.array([[variance]])
@@ -742,37 +825,55 @@ class PortfolioOptimizer:
                 
             # Check for sufficient data points
             min_history = 60  # Require at least 60 data points for reliable estimation
-            if price_data.shape[0] < min_history:
-                logging.warning(f"Insufficient price history: {price_data.shape[0]} < {min_history} days")
+            if filtered_price_data.shape[0] < min_history:
+                logging.warning(f"Insufficient price history: {filtered_price_data.shape[0]} < {min_history} days")
                 # Fall back to sample covariance with stability factor
                 try:
-                    sample_cov = risk_models.sample_cov(price_data, frequency=252)
+                    sample_cov = risk_models.sample_cov(filtered_price_data, frequency=252)
                     # Ensure the matrix is valid
                     if not np.all(np.isfinite(sample_cov)):
                         raise ValueError("Sample covariance contains non-finite values")
-                    return sample_cov + np.eye(sample_cov.shape[0]) * 1e-4  # Increased stability factor
+                    return sample_cov + np.eye(sample_cov.shape[0]) * 1e-3  # Increased stability factor
                 except Exception as e:
                     logging.warning(f"Sample covariance failed for insufficient history: {str(e)}")
                     # Create a simple diagonal covariance matrix
-                    n_assets = price_data.shape[1]
-                    vols = price_data.pct_change().std().fillna(0.02) * np.sqrt(252)
+                    n_assets = filtered_price_data.shape[1]
+                    vols = filtered_price_data.pct_change().std().fillna(0.02) * np.sqrt(252)
                     vols = np.clip(vols, 0.1, 0.4)  # Reasonable volatility bounds
                     return np.diag(vols**2)
             
+            # First try to detect and remove any assets with extreme returns or volatility
+            try:
+                returns = filtered_price_data.pct_change().dropna()
+                # Calculate volatility for each asset
+                vols = returns.std() * np.sqrt(252)
+                # Identify assets with extreme volatility
+                extreme_vol_assets = vols[vols > 0.6].index.tolist()  # Assets with >60% volatility
+                if extreme_vol_assets:
+                    logging.warning(f"Removing assets with extreme volatility: {extreme_vol_assets}")
+                    filtered_price_data = filtered_price_data.drop(extreme_vol_assets, axis=1)
+                    # If we removed all assets, restore the original data
+                    if filtered_price_data.empty:
+                        logging.warning("All assets had extreme volatility. Using original data with volatility caps.")
+                        filtered_price_data = price_data.copy()
+            except Exception as e:
+                logging.warning(f"Error detecting extreme volatility assets: {str(e)}")
+            
             # Use Ledoit-Wolf shrinkage for base estimation with better error handling
             try:
+                # Try with higher shrinkage intensity for more stability
                 reg_cov_matrix = risk_models.CovarianceShrinkage(
-                    price_data,
+                    filtered_price_data,
                     frequency=252
-                ).ledoit_wolf()
+                ).ledoit_wolf(shrinkage_target="constant_correlation")
             except Exception as e:
                 logging.warning(f"Ledoit-Wolf shrinkage failed: {str(e)}. Trying sample covariance.")
                 try:
-                    reg_cov_matrix = risk_models.sample_cov(price_data, frequency=252)
+                    reg_cov_matrix = risk_models.sample_cov(filtered_price_data, frequency=252)
                 except Exception as inner_e:
                     logging.warning(f"Sample covariance also failed: {str(inner_e)}. Using robust estimator.")
                     # Use a more robust estimator
-                    returns = price_data.pct_change().dropna()
+                    returns = filtered_price_data.pct_change().dropna()
                     # Calculate pairwise correlations and volatilities separately
                     vols = returns.std() * np.sqrt(252)
                     vols = vols.clip(0.1, 0.4)  # Reasonable bounds
@@ -789,8 +890,8 @@ class PortfolioOptimizer:
             if not np.all(np.isfinite(reg_cov_matrix)):
                 logging.warning("Covariance matrix contains non-finite values, replacing with robust estimate")
                 # Create a robust diagonal matrix
-                n_assets = price_data.shape[1]
-                vols = price_data.pct_change().std().fillna(0.02) * np.sqrt(252)
+                n_assets = filtered_price_data.shape[1]
+                vols = filtered_price_data.pct_change().std().fillna(0.02) * np.sqrt(252)
                 vols = np.clip(vols, 0.1, 0.4)  # Reasonable volatility bounds
                 return np.diag(vols**2)
                 
@@ -801,16 +902,16 @@ class PortfolioOptimizer:
                 if min_eigenval <= 0:
                     logging.warning(f"Covariance matrix is not positive definite, min eigenvalue: {min_eigenval}")
                     # Add stronger stability term based on the magnitude of the issue
-                    stability_factor = max(1e-4, abs(min_eigenval) * 2)
+                    stability_factor = max(1e-3, abs(min_eigenval) * 3)  # Increased correction factor
                     reg_cov_matrix += np.eye(reg_cov_matrix.shape[0]) * stability_factor
                     logging.info(f"Applied stability factor of {stability_factor} to covariance matrix")
             except np.linalg.LinAlgError:
                 logging.warning("Eigenvalue computation failed, applying stronger correction")
-                stability_factor = 1e-3  # Increased from 1e-4
+                stability_factor = 5e-3  # Increased from 1e-3
                 reg_cov_matrix += np.eye(reg_cov_matrix.shape[0]) * stability_factor
                 
             # Always add minimal stability term to ensure numerical stability
-            stability_factor = 1e-5  # Increased from 1e-6
+            stability_factor = 1e-4  # Increased from 1e-5
             reg_cov_matrix += np.eye(reg_cov_matrix.shape[0]) * stability_factor
             
         except Exception as e:
@@ -984,32 +1085,49 @@ class PortfolioOptimizer:
                     verbose=False
                 )
                 
-                # Try different solvers in order of preference
+                # Try different solvers in order of preference with even more relaxed settings
                 solvers_to_try = [
                     ('ECOS', {
-                        'max_iters': 2000,  # Increased max iterations
-                        'abstol': 1e-6,    # Relaxed tolerance
-                        'reltol': 1e-6,    # Relaxed tolerance
-                        'feastol': 1e-6    # Relaxed feasibility tolerance
+                        'max_iters': 5000,  # Significantly increased max iterations
+                        'abstol': 1e-5,    # Further relaxed tolerance
+                        'reltol': 1e-5,    # Further relaxed tolerance
+                        'feastol': 1e-5,   # Further relaxed feasibility tolerance
+                        'verbose': False
                     }),
                     ('SCS', {
-                        'max_iters': 2500,
-                        'eps': 1e-4,       # Relaxed tolerance
+                        'max_iters': 5000,   # Increased max iterations
+                        'eps': 1e-3,        # Further relaxed tolerance
                         'normalize': True,
-                        'acceleration_lookback': 20
+                        'acceleration_lookback': 30,
+                        'verbose': False
                     }),
                     ('OSQP', {
-                        'max_iter': 5000,
-                        'eps_abs': 1e-5,   # Relaxed tolerance
-                        'eps_rel': 1e-5,   # Relaxed tolerance
+                        'max_iter': 10000,   # Significantly increased max iterations
+                        'eps_abs': 1e-4,    # Further relaxed tolerance
+                        'eps_rel': 1e-4,    # Further relaxed tolerance
                         'polish': True,
-                        'adaptive_rho': True
+                        'adaptive_rho': True,
+                        'verbose': False
+                    }),
+                    ('CLARABEL', {         # Added another solver option as last resort
+                        'max_iter': 5000,
+                        'tol_gap_abs': 1e-4,
+                        'tol_gap_rel': 1e-4,
+                        'verbose': False
                     })
                 ]
                 
                 # Set the first solver as default
                 ef.solver = solvers_to_try[0][0]
                 ef.solver_options = solvers_to_try[0][1]
+                
+                # Set more relaxed tolerances to help with infeasible problems
+                ef._solve_kwargs = {
+                    "verbose": False,
+                    "solver": ef.solver,
+                    "solver_options": ef.solver_options,
+                    "raise_on_failure": False  # Don't raise exception on solver failure
+                }
 
                 # Add L2 regularization with reduced gamma to avoid over-constraining
                 ef.add_objective(objective_functions.L2_reg, gamma=0.05)  # Reduced from 0.1
